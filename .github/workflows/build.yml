@@ -1,0 +1,277 @@
+name: Build Web, Android APK and iOS IPA
+
+# Builds run ONLY when started by hand: GitHub > Actions > "Build Web, Android APK and iOS IPA" > Run workflow.
+# Pushing code to main does not start a build (Render redeploys the website on its own).
+# To publish a GitHub Release, run it by hand on a v* tag.
+on:
+  workflow_dispatch:
+
+# Least privilege: jobs that need more ask for it themselves.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+  JAVA_VERSION: '21'
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  # Public build-time values (set them under Settings > Secrets and variables > Actions > Variables).
+  # Never put the Supabase service-role key, ADMIN_PASSWORD, APP_SESSION_SECRET or GEMINI_API_KEY here:
+  # everything prefixed VITE_ is copied into the downloadable app.
+  VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+  VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+  VITE_API_BASE_URL: ${{ vars.API_BASE_URL }}
+
+jobs:
+  # ---------------------------------------------------------------- Web / PWA ----------------------------
+  # Kept as a check that the web build compiles and as a downloadable zip.
+  # The live website itself is hosted on Render, not here.
+  build-web:
+    name: Build Web/PWA
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run lint
+
+      - name: Build web app
+        run: npm run build:web
+
+      - name: Upload PWA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwa-web-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------- Android ------------------------------
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Warn when the app has no server address
+        shell: bash
+        run: |
+          if [ -z "${VITE_API_BASE_URL}" ]; then
+            echo "::warning title=API_BASE_URL is not set::The APK will open, but sign-in and sync need the server. Add the repository variable API_BASE_URL (e.g. https://hydratehub.onrender.com)."
+          fi
+
+      # GitHub-hosted Ubuntu runners ship an Android SDK. Do not run android-actions/setup-android here:
+      # it can pick a different cmdline-tools revision and fail before the build starts.
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            # Fallback path used on some runner images
+            SDKMANAGER="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1 || true)"
+          fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web assets for Capacitor
+        run: npm run build:web
+
+      - name: Generate Android project (skipped if android/ is committed)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ ! -d android ]; then
+            npx cap add android
+          fi
+          # Icon generation needs an assets/ (or resources/) folder with source icons.
+          if [ -d assets ] || [ -d resources ]; then
+            npx --yes @capacitor/assets generate --android
+          else
+            echo "No assets/ or resources/ folder found - skipping icon generation"
+          fi
+          npx cap sync android
+
+      - name: Harden Gradle network timeouts and memory
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Default Gradle socket timeout is 10s - that is what produces "timeout (10000ms)" when
+          # the wrapper first downloads Gradle itself or when Maven Central is slow.
+          mkdir -p android
+          {
+            echo ""
+            echo "# CI: raise network timeouts (default 10s causes timeout (10000ms) on first Gradle download)"
+            echo "systemProp.http.connectionTimeout=120000"
+            echo "systemProp.http.socketTimeout=120000"
+            echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
+            echo "systemProp.org.gradle.internal.http.socketTimeout=120000"
+            echo "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8"
+            echo "org.gradle.daemon=false"
+          } >> android/gradle.properties
+          # Also export for the initial wrapper bootstrap before gradle.properties is read
+          echo "ORG_GRADLE_PROJECT_org.gradle.jvmargs=-Xmx3g" >> "$GITHUB_ENV"
+
+      - name: Set version code and turn off Android auto-backup of app data
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/" android/app/build.gradle
+          # the saved sign-in token must not be copied into Google/ADB backups
+          sed -i 's/android:allowBackup="true"/android:allowBackup="false"/' android/app/src/main/AndroidManifest.xml
+
+      - name: Build debug APK
+        working-directory: android
+        env:
+          # Extra belt-and-suspenders for the wrapper's first download
+          GRADLE_OPTS: >-
+            -Dorg.gradle.internal.http.connectionTimeout=120000
+            -Dorg.gradle.internal.http.socketTimeout=120000
+            -Dhttp.connectionTimeout=120000
+            -Dhttp.socketTimeout=120000
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -f android/app/build/outputs/apk/debug/app-debug.apk
+          ls -lh android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hydrate-hub-android-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------- iOS ----------------------------------
+  # Produces an UNSIGNED .ipa (no Apple Developer account needed). It cannot be installed on a phone until it is
+  # signed (AltStore / Sideloadly / your own certificate). Signed builds for TestFlight need Apple secrets.
+  # NOTE: macOS runner minutes count about 10x against the GitHub Free monthly allowance on private repos.
+  build-ios:
+    name: Build iOS IPA (unsigned)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web assets for Capacitor
+        run: npm run build:web
+
+      - name: Generate iOS project (skipped if ios/ is committed)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ ! -d ios ]; then npx cap add ios; fi
+          # Icon generation needs an assets/ (or resources/) folder with source icons.
+          if [ -d assets ] || [ -d resources ]; then
+            npx --yes @capacitor/assets generate --ios
+          else
+            echo "No assets/ or resources/ folder found - skipping icon generation"
+          fi
+          npx cap sync ios
+
+      - name: Build app (no code signing)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          xcodebuild \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APP="build/ios/Build/Products/Release-iphoneos/App.app"
+          test -d "$APP"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry hydrate-hub-ios-unsigned.ipa Payload
+          ls -lh hydrate-hub-ios-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hydrate-hub-ios-unsigned-ipa
+          path: hydrate-hub-ios-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------- Release (tags like v1.2.0) ------------
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-web, build-android, build-ios]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip the web build
+        run: cd artifacts/pwa-web-dist && zip -qr ../hydrate-hub-web.zip .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/hydrate-hub-android-apk/app-debug.apk
+            artifacts/hydrate-hub-ios-unsigned-ipa/hydrate-hub-ios-unsigned.ipa
+            artifacts/hydrate-hub-web.zip

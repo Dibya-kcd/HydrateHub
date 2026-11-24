@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="hhBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0A1F44" />
+      <stop offset="55%" stop-color="#173D7A" />
+      <stop offset="100%" stop-color="#2864D9" />
+    </linearGradient>
+    <linearGradient id="hhDrop" x1="25%" y1="0%" x2="75%" y2="100%">
+      <stop offset="0%" stop-color="#7DD3FC" />
+      <stop offset="50%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#0284C7" />
+    </linearGradient>
+    <linearGradient id="hhAmber" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FBBF24" />
+      <stop offset="100%" stop-color="#F59E0B" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded squircle app background -->
+  <rect width="512" height="512" rx="112" fill="url(#hhBg)" />
+  <rect x="6" y="6" width="500" height="500" rx="106" fill="none" stroke="#60A5FA" stroke-width="4" stroke-opacity="0.28" />
+
+  <!-- Outer water droplet -->
+  <path
+    d="M 256 88 C 316 172, 376 238, 376 312 C 376 382, 322 432, 256 432 C 190 432, 136 382, 136 312 C 136 238, 196 172, 256 88 Z"
+    fill="url(#hhDrop)"
+  />
+
+  <!-- Soft inner wave depth -->
+  <path
+    d="M 150 326 Q 204 352, 256 330 T 362 332 C 352 386, 310 420, 256 420 C 202 420, 160 386, 150 326 Z"
+    fill="#0A1F44"
+    opacity="0.24"
+  />
+
+  <!-- Hydrate Hub "H" emblem centered in droplet -->
+  <g fill="#FFFFFF">
+    <rect x="200" y="232" width="28" height="128" rx="10" />
+    <rect x="284" y="232" width="28" height="128" rx="10" />
+    <rect x="200" y="282" width="112" height="26" rx="8" fill="url(#hhAmber)" />
+  </g>
+
+  <!-- Subtle specular highlight -->
+  <ellipse cx="212" cy="196" rx="13" ry="30" transform="rotate(-24 212 196)" fill="#FFFFFF" opacity="0.45" />
+</svg>

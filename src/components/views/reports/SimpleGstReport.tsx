@@ -1,0 +1,652 @@
+import React, { useMemo, useState } from 'react';
+import { AlertTriangle, ArrowLeft, ChevronRight, Download, MessageSquare, Zap } from 'lucide-react';
+import { Bill, Customer, OrganizationProfile, Product } from '../../../types';
+import { money, resolveProductGstRate } from '../../../utils/billing';
+import { billTaxBasis } from '../../../utils/billTaxBasis';
+import { resolveTaxRegime, noOutputTax } from '../../../tax/appRegime';
+import {
+  buildGstLines,
+  exportCaGstPack,
+  orgStateCodeFromProfile,
+  summarizeInvoices,
+} from '../../../utils/gstReports';
+import { downloadPdf, downloadXlsx, fileStamp } from '../../../utils/reportDownload';
+import { ReportDownloadButtons } from '../../common/ReportDownloadButtons';
+import { ReportTitleBar, reportCard } from './ReportKit';
+import { useLedger } from '../../../context/LedgerContext';
+import { isGstExcludedBill } from '../../../utils/invoiceCommon';
+import { MobileReportTopBar } from './mobile/MobileReportContext';
+
+/**
+ * GST in one screen:
+ *   GST charged on sales  - GST on sales returns  = GST you owe
+ *   GST paid on purchases - GST on goods returned to suppliers = Input credit
+ *   GST to pay = GST you owe - Input credit   (extra credit is carried forward)
+ *
+ * Figures are the same ones the GSTR-3B screen and the CA Excel pack use (gstTaxSummary).
+ * The B2B / B2C / HSN / purchase registers stay available behind one button for the CA.
+ */
+
+export interface SimpleGstReportProps {
+  gstTaxSummary: {
+    outputTaxable: number;
+    outputCgst: number;
+    outputSgst: number;
+    outputIgst?: number;
+    outputCess: number;
+    totalOutputGst: number;
+    creditNoteTax?: number;
+    netOutputGst?: number;
+    inputGstCredit: number;
+    itcReversal?: { total: number };
+    netGstPayable: number;
+    carryForwardItc?: number;
+  };
+  purchaseStats: { netPurchaseVal: number; totalGstPaid: number; totalCessPaid: number };
+  filteredBills: Bill[];
+  products: Product[];
+  customers: Customer[];
+  orgProfile?: OrganizationProfile | null;
+  invoicePrefix?: string;
+  periodLabel: string;
+  excludedBillsCount?: number;
+  excludedBillsTotal?: number;
+  /** The full registers (B2B, B2C, HSN, purchases), shown only when asked for. */
+  detail?: React.ReactNode;
+}
+
+const Row: React.FC<{ label: string; value: number; kind?: 'item' | 'less' | 'subtotal' | 'grand'; hint?: string }> = ({
+  label,
+  value,
+  kind = 'item',
+  hint,
+}) => {
+  const strong = kind === 'subtotal' || kind === 'grand';
+  return (
+    <div
+      className={`flex items-start justify-between gap-3 px-3.5 py-2.5 border-t border-black/5 first:border-t-0 ${
+        kind === 'grand' ? 'bg-slate-900 text-white' : kind === 'subtotal' ? 'bg-[#faf8f5]' : ''
+      }`}
+    >
+      <div className="min-w-0">
+        <div className={`leading-snug ${kind === 'grand' ? 'text-[15px] font-extrabold' : strong ? 'text-[14px] font-bold' : 'text-[14px] font-medium'}`}>
+          {label}
+        </div>
+        {hint ? <div className={`text-xs leading-snug ${kind === 'grand' ? 'text-slate-300' : 'text-slate-500'}`}>{hint}</div> : null}
+      </div>
+      <div className={`tabular-nums whitespace-nowrap ${kind === 'grand' ? 'text-[16px] font-extrabold' : strong ? 'text-[14px] font-extrabold' : 'text-[14px] font-semibold'}`}>
+        {kind === 'less' ? '− ' : ''}₹{money(Math.abs(value))}
+      </div>
+    </div>
+  );
+};
+
+const Heading: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="px-3.5 py-1.5 text-xs font-bold uppercase tracking-wide text-slate-500 bg-slate-50 border-t border-black/5 first:border-t-0">
+    {children}
+  </div>
+);
+
+const th = 'px-3 py-2 text-xs font-bold uppercase tracking-wide text-slate-500 text-right whitespace-nowrap bg-[#faf8f5]';
+const td = 'px-3 py-2 text-[13px] text-slate-800 text-right tabular-nums whitespace-nowrap';
+
+export const SimpleGstReport: React.FC<SimpleGstReportProps> = ({
+  gstTaxSummary: g,
+  purchaseStats,
+  filteredBills,
+  products,
+  customers,
+  orgProfile = null,
+  invoicePrefix = 'INV',
+  periodLabel,
+  excludedBillsCount = 0,
+  excludedBillsTotal = 0,
+  detail,
+}) => {
+  const [showDetail, setShowDetail] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const { convertBillsToTaxInvoices } = useLedger();
+
+  const gstBills = useMemo(
+    () => (filteredBills || []).filter((b) => !isGstExcludedBill(b, products)),
+    [filteredBills, products],
+  );
+  const localExcluded = useMemo(
+    () => (filteredBills || []).filter((b) => b.status !== 'cancelled' && !(b as any).cancelled && isGstExcludedBill(b, products)),
+    [filteredBills, products],
+  );
+  const effectiveExcludedCount = excludedBillsCount || localExcluded.length;
+  const effectiveExcludedTotal = excludedBillsTotal || localExcluded.reduce((s, b) => s + (Number(b.total) || 0), 0);
+
+  const orgStateCode = orgStateCodeFromProfile(orgProfile);
+  const lines = useMemo(
+    () => buildGstLines(gstBills, products, customers, invoicePrefix, { orgStateCode }),
+    [gstBills, products, customers, invoicePrefix, orgStateCode],
+  );
+
+  const zeroGstBills = useMemo(() => {
+    const byId = new Map<number, Product>();
+    (products || []).forEach((p) => byId.set(p.id, p));
+    const isAllNonGstProducts = (b: Bill) =>
+      (b.items || []).length > 0 &&
+      (b.items || []).every((it) => it.taxability === 'non_gst' || byId.get(it.productId)?.taxability === 'non_gst');
+
+    const zeroBillIds = new Set(
+      lines
+        .filter((l) => l.gstRatePct === 0 && (l.taxable > 0 || l.qty > 0))
+        .map((l) => l.billId)
+    );
+    return gstBills.filter((b) => {
+      if (b.status === 'cancelled' || !(b.items || []).length) return false;
+      if (isAllNonGstProducts(b)) return false;
+      if (zeroBillIds.has(b.id)) return true;
+      const isNonGst = b.invoiceType === 'retail' || b.invoiceType === 'bill_of_supply' || b.isGstInvoice === false;
+      const zeroTaxStored = (Number(b.cgst) || 0) + (Number(b.sgst) || 0) < 0.01;
+      return (isNonGst || zeroTaxStored) && (Number(b.total) || 0) > 0;
+    });
+  }, [gstBills, lines, products]);
+
+  // GST sitting inside the prices of the bills above. The P&L treats it as owed to the government (not profit), but
+  // it is not in the GST figures on this page until those bills become tax invoices, so show it here to reconcile.
+  const gstInsideNonGstBillPrices = useMemo(() => {
+    const byId = new Map<number, Product>();
+    (products || []).forEach((p) => byId.set(p.id, p));
+    let total = 0;
+    for (const b of zeroGstBills) {
+      const date = String(b.date || '').slice(0, 10);
+      const carve = orgProfile ? !noOutputTax(resolveTaxRegime(orgProfile, date)) : true;
+      const r = billTaxBasis(b, {
+        carveGstFromPrices: carve,
+        rateFor: (item) => {
+          const prod = byId.get(item.productId);
+          if (item.taxability === 'non_gst' || prod?.taxability === 'non_gst') return 0;
+          return item.gst !== undefined && item.gst !== null
+            ? (item.gst as number)
+            : resolveProductGstRate(prod, item.category);
+        },
+      });
+      if (r.carved) total += r.gst;
+    }
+    return Math.round(total * 100) / 100;
+  }, [zeroGstBills, products, orgProfile]);
+
+  const zeroGstUnits = useMemo(() => {
+    const fromLines = lines.filter((l) => l.gstRatePct === 0).reduce((s, l) => s + (Number(l.qty) || 0), 0);
+    if (fromLines > 0) return fromLines;
+    return zeroGstBills.reduce((s, b) => s + (b.items || []).reduce((iq, it) => iq + (Number(it.qty) || 0), 0), 0);
+  }, [lines, zeroGstBills]);
+
+  const byRate = useMemo(() => {
+    const m = new Map<number, { rate: number; taxable: number; cgst: number; sgst: number; igst: number; cess: number }>();
+    for (const l of lines) {
+      const cur = m.get(l.gstRatePct) || { rate: l.gstRatePct, taxable: 0, cgst: 0, sgst: 0, igst: 0, cess: 0 };
+      cur.taxable += l.taxable;
+      cur.cgst += l.cgst;
+      cur.sgst += l.sgst;
+      cur.igst += l.igst;
+      cur.cess += l.cess;
+      m.set(l.gstRatePct, cur);
+    }
+    return Array.from(m.values()).sort((a, b) => b.rate - a.rate);
+  }, [lines]);
+  const showIgst = byRate.some((r) => r.igst > 0.004) || (g.outputIgst || 0) > 0.004;
+  const showCess = byRate.some((r) => r.cess > 0.004) || g.outputCess > 0.004;
+
+  // Invoices whose saved total differs from the invoice lines (the GST report and the sales report would disagree).
+  const mismatches = useMemo(() => {
+    const byId = new Map<number, Bill>();
+    gstBills.forEach((b) => byId.set(b.id, b));
+    const out: { invoiceNo: string; customer: string }[] = [];
+    for (const inv of summarizeInvoices(lines)) {
+      const b = byId.get(inv.billId);
+      if (!b) continue;
+      const totalDiff = Math.abs(inv.invoiceTotal - (Number(b.total) || 0));
+      const taxDiff = Math.abs(inv.cgst + inv.sgst + inv.igst - ((Number(b.cgst) || 0) + (Number(b.sgst) || 0)));
+      if (totalDiff > 1 || taxDiff > 1) out.push({ invoiceNo: inv.invoiceNo, customer: inv.customerName });
+    }
+    return out;
+  }, [lines, gstBills]);
+
+  // Figures
+  const outputIgst = g.outputIgst || 0;
+  const grossOutput = g.totalOutputGst;
+  const cnTax = g.creditNoteTax || 0;
+  const netOutput = g.netOutputGst ?? Math.max(0, grossOutput - cnTax);
+  const purchaseGst = purchaseStats.totalGstPaid + (purchaseStats.totalCessPaid || 0);
+  const itcReversed = g.itcReversal?.total || 0;
+  const inputCredit = g.inputGstCredit;
+  const payable = g.netGstPayable;
+  const carryForward = g.carryForwardItc ?? Math.max(0, inputCredit - netOutput);
+
+  const exportRows = (): [string, number][] => [
+    ['Taxable sales', g.outputTaxable],
+    ['CGST on sales', g.outputCgst],
+    ['SGST on sales', g.outputSgst],
+    ...(showIgst ? ([['IGST on sales', outputIgst]] as [string, number][]) : []),
+    ...(showCess ? ([['Cess on sales', g.outputCess]] as [string, number][]) : []),
+    ['Total GST on sales', grossOutput],
+    ['Less: GST on sales returns', cnTax],
+    ['GST you owe on sales', netOutput],
+    ['Taxable purchases', purchaseStats.netPurchaseVal],
+    ['GST paid on purchases', purchaseGst],
+    ['Less: reversed on goods returned to suppliers', itcReversed],
+    ['Input credit', inputCredit],
+    ['GST to pay', payable],
+    ['Credit carried forward', carryForward],
+  ];
+
+  const exportExcel = () =>
+    downloadXlsx(`gst-summary-${fileStamp()}.xlsx`, [
+      {
+        name: 'GST',
+        header: ['Item', 'Amount (Rs.)'],
+        rows: [['Period', periodLabel], ...exportRows().map(([a, b]) => [a, Math.round(b * 100) / 100] as (string | number)[])],
+      },
+      {
+        name: 'By rate',
+        header: ['GST rate %', 'Taxable', 'CGST', 'SGST', 'IGST', 'Cess'],
+        rows: byRate.map((r) => [r.rate, r.taxable, r.cgst, r.sgst, r.igst, r.cess].map((n) => Math.round(n * 100) / 100)),
+      },
+    ]);
+
+  const exportPdf = () =>
+    downloadPdf({
+      filename: `gst-summary-${fileStamp()}.pdf`,
+      title: 'GST summary',
+      subtitle: ['MrWater Distribution', `Period: ${periodLabel}`],
+      sections: [
+        { header: ['Item', 'Amount (Rs.)'], rows: exportRows().map(([a, b]) => [a, money(b)]), rightAlign: [1] },
+        {
+          title: 'Sales by GST rate',
+          header: ['Rate', 'Taxable', 'CGST', 'SGST', 'IGST'],
+          rows: byRate.map((r) => [`${r.rate}%`, money(r.taxable), money(r.cgst), money(r.sgst), money(r.igst)]),
+          rightAlign: [1, 2, 3, 4],
+        },
+      ],
+    });
+
+  const downloadForCa = () => {
+    exportCaGstPack({
+      bills: gstBills,
+      products,
+      customers,
+      org: orgProfile,
+      invoicePrefix,
+      periodLabel,
+      inputGstCredit: inputCredit,
+    });
+    setMsg('Excel / CSV pack downloaded for your CA');
+    setTimeout(() => setMsg(null), 4000);
+  };
+
+  if (showDetail && detail) {
+    return (
+      <div className="space-y-3">
+        <div className="md:hidden">
+          <MobileReportTopBar
+            title="Invoice lists"
+            sub="GST"
+            doubleBack
+            onBack={() => setShowDetail(false)}
+            showPeriod={false}
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowDetail(false)}
+          className="hidden md:inline-flex items-center gap-1.5 text-sm font-bold text-sky-700 hover:underline cursor-pointer"
+        >
+          <ArrowLeft size={15} /> Back to GST summary
+        </button>
+        {detail}
+      </div>
+    );
+  }
+
+  const owes = payable > 0.004;
+  const whatsappText = `🧾 *GST — ${periodLabel}*\nGST on sales: ₹${money(netOutput)}\nInput credit: ₹${money(inputCredit)}\n*${owes ? 'GST to pay' : 'Credit carried forward'}: ₹${money(owes ? payable : carryForward)}*`;
+  const whatsappUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(whatsappText)}`;
+
+  const compactRs = (n: number) => {
+    const abs = Math.abs(n);
+    if (abs >= 100000) return `₹${(abs / 100000).toFixed(1)}L`;
+    if (abs >= 1000) return `₹${(abs / 1000).toFixed(1)}k`;
+    return `₹${Math.round(abs)}`;
+  };
+
+  const shareProps = {
+    reportTitle: 'GST summary',
+    summaryLines: [
+      { label: owes ? 'GST payable' : 'Credit carried forward', value: `₹${money(owes ? payable : carryForward)}` },
+      { label: 'Output GST', value: `₹${money(netOutput)}` },
+      { label: 'Input credit', value: `₹${money(inputCredit)}` },
+    ],
+    sheets: [
+      {
+        name: 'GST',
+        header: ['Item', 'Amount (Rs.)'],
+        rows: [['Period', periodLabel], ...exportRows().map(([a, b]) => [a, Math.round(b * 100) / 100] as (string | number)[])],
+      },
+    ],
+    pdfSections: [
+      { header: ['Item', 'Amount (Rs.)'], rows: exportRows().map(([a, b]) => [a, money(b)]), rightAlign: [1] },
+    ],
+  };
+
+  return (
+    <>
+    {/* ============================ PHONE ============================ */}
+    <div className="md:hidden space-y-3" id="report-gst-phone">
+      <MobileReportTopBar
+        title="GST"
+        sub="Summary"
+        showPeriod
+        shareProps={shareProps}
+      />
+
+      {/* GST payable summary card */}
+      <section className="rt-rep-card rt-rep-pad">
+        <div className="text-[12px] font-medium text-[var(--text-2)]">
+          {owes ? 'GST payable' : 'No GST to pay'}
+        </div>
+        <div className={`text-[26px] font-extrabold tracking-tight leading-tight tabular-nums mt-0.5 ${owes ? 'text-[var(--text)]' : 'text-[var(--paid)]'}`}>
+          ₹{money(owes ? payable : 0)}
+        </div>
+        <div className="text-xs text-[var(--text-2)] mt-1 tabular-nums">
+          {owes
+            ? `Output ₹${money(netOutput)} − input credit ₹${money(inputCredit)}`
+            : carryForward > 0.004
+              ? `Output ₹${money(netOutput)} − input credit ₹${money(inputCredit)} (₹${money(carryForward)} credit carried forward)`
+              : 'Output GST and input credit are equal'}
+        </div>
+      </section>
+
+      {effectiveExcludedCount > 0 && (
+        <div className="rounded-xl border border-teal-200 bg-teal-50 px-3.5 py-2.5 text-xs text-teal-900">
+          <b>{effectiveExcludedCount} Non-GST / Trading cash memo{effectiveExcludedCount === 1 ? '' : 's'}</b> (NG-… · ₹{money(effectiveExcludedTotal)}) excluded from GST filings.
+        </div>
+      )}
+
+      {mismatches.length > 0 && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 flex gap-2">
+          <AlertTriangle size={15} className="shrink-0 mt-0.5 text-amber-600" />
+          <div>
+            <b>{mismatches.length} invoice{mismatches.length === 1 ? '' : 's'}</b> differ from their lines ({mismatches.slice(0, 2).map((m) => m.invoiceNo).join(', ')}{mismatches.length > 2 ? '…' : ''}).
+            {detail && (
+              <>
+                {' '}
+                <button type="button" onClick={() => setShowDetail(true)} className="font-bold underline cursor-pointer">
+                  Review and fix
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Sales by GST rate */}
+      {byRate.length > 0 && (
+        <section className="rt-rep-card overflow-hidden">
+          <div className="px-3.5 pt-3 pb-2 text-[13px] font-bold text-[var(--text)]">
+            Sales by GST rate
+          </div>
+          <div className="divide-y divide-[var(--divider)]">
+            {byRate.map((r) => {
+              const rateTax = r.cgst + r.sgst + r.igst + r.cess;
+              const isZeroWithFix = r.rate === 0 && zeroGstBills.length > 0;
+              return (
+                <div key={r.rate} className={`px-3.5 py-2.5 flex items-center justify-between gap-3 text-[13px] ${isZeroWithFix ? 'bg-amber-50/80' : ''}`}>
+                  <div className="min-w-0">
+                    <span className="font-medium text-[var(--text-2)]">
+                      {r.rate}% · {compactRs(r.taxable)} sales
+                    </span>
+                    {isZeroWithFix && (
+                      <span className="ml-1.5 text-xs font-bold px-1.5 py-0.5 rounded bg-[var(--due-bg)] text-[var(--due)]">
+                        Non-GST Error
+                      </span>
+                    )}
+                  </div>
+                  <span className="font-extrabold text-[var(--text)] tabular-nums shrink-0">
+                    ₹{money(rateTax)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {zeroGstBills.length > 0 && (
+            <div className="p-3 bg-amber-50 border-t border-amber-200 space-y-2">
+              <div className="text-xs text-amber-900">
+                <b>{zeroGstBills.length} Bill(s)</b> recorded as 0% Non-GST ({zeroGstUnits} units).
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const r = convertBillsToTaxInvoices(zeroGstBills.map((b) => b.id));
+                  setMsg(`Done! ${r.fixed} invoice(s) converted to B2C Tax Invoices.`);
+                }}
+                className="w-full py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Zap size={13} className="text-amber-300 fill-current" />
+                <span>Fix 0% Bills (Convert to Tax Invoices)</span>
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Primary CTA pills */}
+      <button
+        type="button"
+        onClick={downloadForCa}
+        className="w-full h-[46px] rounded-full bg-[var(--primary)] text-white text-[14px] font-bold flex items-center justify-center gap-2 cursor-pointer active:opacity-90"
+      >
+        <Download size={16} aria-hidden="true" />
+        <span>Download for CA</span>
+      </button>
+
+      <a
+        href={whatsappUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="w-full h-[46px] rounded-full bg-white border border-[var(--primary)] text-[var(--primary)] text-[14px] font-bold flex items-center justify-center gap-2 active:bg-[#f0f7ff]"
+      >
+        <MessageSquare size={15} aria-hidden="true" />
+        <span>Share on WhatsApp</span>
+      </a>
+
+      {detail && (
+        <button
+          type="button"
+          onClick={() => setShowDetail(true)}
+          className="rt-rep-card w-full px-3.5 py-3 flex items-center justify-between gap-2 text-[13px] font-bold text-[var(--text)] cursor-pointer active:bg-[#f8fafc]"
+        >
+          <span>Invoice lists: B2B, B2C, HSN, purchases</span>
+          <ChevronRight size={16} className="text-[var(--text-2)]" aria-hidden="true" />
+        </button>
+      )}
+
+      {msg && <div className="text-xs font-semibold text-emerald-700 px-1">{msg}</div>}
+    </div>
+
+    {/* ======================= TABLET / DESKTOP ======================= */}
+    <div className="hidden md:flex flex-col gap-3 w-full max-w-3xl" id="report-gst">
+      <ReportTitleBar
+        title="GST"
+        sub={periodLabel}
+        actions={
+          <ReportDownloadButtons
+            onExcel={exportExcel}
+            onPdf={exportPdf}
+            reportTitle="GST summary"
+            whatsappText={`🧾 *GST — ${periodLabel}*\nGST on sales: ₹${money(netOutput)}\nInput credit: ₹${money(inputCredit)}\n*${owes ? 'GST to pay' : 'Credit carried forward'}: ₹${money(owes ? payable : carryForward)}*`}
+          />
+        }
+      />
+
+      {/* The one number that matters */}
+      <div className={`${reportCard} p-4 ${owes ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-200'}`}>
+        <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
+          {owes ? 'GST to pay' : 'No GST to pay'}
+        </div>
+        <div className={`text-3xl font-extrabold tabular-nums ${owes ? 'text-amber-800' : 'text-emerald-800'}`}>
+          ₹{money(owes ? payable : 0)}
+        </div>
+        <div className="text-xs text-slate-600 mt-0.5">
+          {owes
+            ? `GST on sales ₹${money(netOutput)} less input credit ₹${money(inputCredit)}`
+            : carryForward > 0.004
+              ? `Input credit is more than GST on sales. ₹${money(carryForward)} carries forward.`
+              : 'GST on sales and input credit are equal.'}
+        </div>
+      </div>
+
+      {effectiveExcludedCount > 0 && (
+        <div className="rounded-xl border border-teal-200 bg-teal-50 px-3.5 py-2.5 text-xs text-teal-900">
+          <b>{effectiveExcludedCount} Non-GST / Trading cash memo{effectiveExcludedCount === 1 ? '' : 's'}</b> (NG-… totalling ₹{money(effectiveExcludedTotal)}) {effectiveExcludedCount === 1 ? 'is' : 'are'} excluded from GST filings &amp; CA pack (still counted in Sales &amp; P&amp;L).
+        </div>
+      )}
+
+      {mismatches.length > 0 && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 flex gap-2">
+          <AlertTriangle size={16} className="shrink-0 mt-0.5 text-amber-600" />
+          <div>
+            <b>{mismatches.length} invoice{mismatches.length === 1 ? '' : 's'}</b> have a saved total that differs from their
+            lines ({mismatches.slice(0, 3).map((m) => m.invoiceNo).join(', ')}
+            {mismatches.length > 3 ? '…' : ''}), so GST here may not match the sales report.
+            {detail && (
+              <>
+                {' '}
+                <button type="button" onClick={() => setShowDetail(true)} className="font-bold underline cursor-pointer">
+                  Review and fix
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* The statement */}
+      <section className={`${reportCard} overflow-hidden`}>
+        <Heading>GST on sales</Heading>
+        <Row label="Taxable sales" value={g.outputTaxable} hint="Before GST, before returns" />
+        <Row label="CGST" value={g.outputCgst} />
+        <Row label="SGST" value={g.outputSgst} />
+        {showIgst && <Row label="IGST" value={outputIgst} />}
+        {showCess && <Row label="Cess" value={g.outputCess} />}
+        {cnTax > 0.004 && (
+          <>
+            <Row label="Total GST on sales" value={grossOutput} kind="subtotal" />
+            <Row label="GST on sales returns" value={cnTax} kind="less" hint="Credit notes issued to customers" />
+          </>
+        )}
+        <Row label="GST you owe on sales" value={netOutput} kind="subtotal" />
+
+        <Heading>Input credit on purchases</Heading>
+        <Row label="GST paid on purchases" value={purchaseGst} hint={`On taxable purchases of ₹${money(purchaseStats.netPurchaseVal)}`} />
+        {itcReversed > 0.004 && <Row label="Reversed on goods returned to suppliers" value={itcReversed} kind="less" />}
+        <Row label="Input credit" value={inputCredit} kind="subtotal" />
+
+        <Row
+          label={owes ? 'GST to pay' : carryForward > 0.004 ? 'Credit carried forward' : 'GST to pay'}
+          value={owes ? payable : carryForward}
+          kind="grand"
+        />
+      </section>
+
+      {byRate.length > 0 && (
+        <section className={`${reportCard} overflow-hidden`}>
+          <div className="px-3.5 py-2.5 text-[13px] font-bold text-slate-900 bg-[#faf8f5]">Sales by GST rate</div>
+          <div className="overflow-x-auto border-t border-black/5">
+            <table className="w-full min-w-[480px] text-left">
+              <thead>
+                <tr>
+                  <th className={`${th} text-left`}>Rate</th>
+                  <th className={th}>Taxable</th>
+                  <th className={th}>CGST</th>
+                  <th className={th}>SGST</th>
+                  {showIgst && <th className={th}>IGST</th>}
+                  {showCess && <th className={th}>Cess</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {byRate.map((r) => {
+                  const isZeroWithFix = r.rate === 0 && zeroGstBills.length > 0;
+                  return (
+                    <tr key={r.rate} className={`border-t border-black/5 ${isZeroWithFix ? 'bg-amber-50/80' : ''}`}>
+                      <td className="px-3 py-2 text-[13px] font-semibold text-slate-800">
+                        <span>{r.rate}%</span>
+                        {isZeroWithFix && (
+                          <span className="ml-2 text-xs font-bold px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-300">
+                            Non-GST Error
+                          </span>
+                        )}
+                      </td>
+                      <td className={td}>₹{money(r.taxable)}</td>
+                      <td className={td}>₹{money(r.cgst)}</td>
+                      <td className={td}>₹{money(r.sgst)}</td>
+                      {showIgst && <td className={td}>₹{money(r.igst)}</td>}
+                      {showCess && <td className={td}>₹{money(r.cess)}</td>}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {zeroGstBills.length > 0 && (
+            <div className="p-3 bg-amber-50 border-t border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-bold text-amber-900">
+                    {zeroGstBills.length} Bill(s) Recorded as 0% Non-GST ({zeroGstUnits} units · ₹{money(byRate.find((r) => r.rate === 0)?.taxable || 0)})
+                  </div>
+                  <div className="text-xs text-amber-800/90 mt-0.5">
+                    Sales to village shops must be B2C Tax Invoices. Click below to backward-calculate 40% & 5% GST from MRP and merge into legal tax rows.
+                  </div>
+                  {gstInsideNonGstBillPrices > 0.004 && (
+                    <div className="text-xs font-semibold text-amber-900 mt-1">
+                      GST included in the prices of these bills: ₹{money(gstInsideNonGstBillPrices)}. The Profit &amp; Loss already treats it as owed to the government, not as profit; it is not in the GST totals above until the bills are converted.
+                    </div>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const r = convertBillsToTaxInvoices(zeroGstBills.map((b) => b.id));
+                  setMsg(`Done! ${r.fixed} invoice(s) converted to B2C Tax Invoices with backward-calculated 40% & 5% GST. The 0% row is now ₹0.00.`);
+                }}
+                className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white text-xs font-bold whitespace-nowrap cursor-pointer transition-all shadow-sm flex items-center justify-center gap-1.5 shrink-0"
+              >
+                <Zap size={14} className="text-amber-300 fill-current" />
+                <span>Fix 0% Bills (Convert to Tax Invoices)</span>
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      <div className="flex flex-col sm:flex-row gap-2">
+        <button
+          type="button"
+          onClick={downloadForCa}
+          className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 text-white px-3.5 py-3 text-sm font-bold hover:bg-slate-800 cursor-pointer"
+        >
+          <Download size={15} /> Download for CA
+        </button>
+        {detail && (
+          <button
+            type="button"
+            onClick={() => setShowDetail(true)}
+            className="inline-flex flex-1 items-center justify-between gap-2 rounded-xl border border-black/10 bg-white px-3.5 py-3 text-sm font-bold text-slate-800 hover:bg-slate-50 cursor-pointer"
+          >
+            <span>Invoice lists: B2B, B2C, HSN, purchases</span>
+            <ChevronRight size={16} className="text-slate-400" />
+          </button>
+        )}
+      </div>
+      {msg && <div className="text-xs font-semibold text-emerald-700 px-1">{msg}</div>}
+    </div>
+    </>
+  );
+};

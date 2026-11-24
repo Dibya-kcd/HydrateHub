@@ -1,0 +1,391 @@
+/* ============================================================================
+   Hydrate Hub - THEME (all breakpoints)
+   Tokens live in index.css (:root). This file holds the rules that apply the tokens:
+
+     Global (every width)    typography, cards, metric tiles, buttons, inputs, report cards,
+                             legacy Tailwind colour remap.
+     Phone only (<=767px)    page gutter, app header, old bottom bar and menu sheet styling.
+     Tablet / desktop        see the shell rules in index.css ("App shell per breakpoint").
+
+   No logic, routes or data code depend on this file; it is presentation only.
+   Load order: imported in main.tsx after index.css, so it wins over the older rules.
+   ============================================================================ */
+
+/* ------------------------------------------------------------ 2. Typography */
+/* Inter is the only Latin family; Noto Sans Oriya follows it (and leads in Odia mode, see index.css).
+   This is the one !important in the file, so a stray font-mono / font-serif / inline family on any
+   screen cannot sneak in. */
+html,
+body,
+body * {
+  font-family: var(--font-sans) !important;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: calc(var(--fs-body) * var(--app-font-scale, 1));
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+:where(h1, h2, h3, h4) {
+  letter-spacing: -0.01em;
+}
+/* Page title 24px phone / 28px tablet / 30px desktop, weight 700 (see "Unified page system" in shell.css). */
+:where(h1) {
+  font-weight: 700;
+  line-height: 1.2;
+  font-size: calc(var(--fs-page-title) * var(--app-font-scale, 1));
+}
+/* Card title 16-17px / 800 */
+:where(h2) {
+  font-weight: 700;
+  line-height: 1.3;
+  font-size: calc(var(--fs-card-title) * var(--app-font-scale, 1));
+}
+:where(h3, h4) {
+  font-weight: 700;
+  line-height: 1.3;
+  font-size: calc(var(--fs-body) * var(--app-font-scale, 1));
+}
+
+/* Label scale: 12px / 700 uppercase, tracking .04-.06em. Nothing renders below 12px. */
+.uppercase {
+  letter-spacing: 0.05em;
+}
+[class*="tracking-wider"],
+[class*="tracking-widest"],
+[class*="tracking-[0."] {
+  letter-spacing: 0.05em;
+}
+[class~="text-[8px]"],
+[class~="text-[9px]"],
+[class~="text-[9.5px]"],
+[class~="text-[10px]"],
+[class~="text-[10.5px]"],
+[class~="text-[11px]"],
+[class*="sm:text-[10px]"],
+[class*="sm:text-[11px]"] {
+  font-size: calc(var(--fs-min) * var(--app-font-scale, 1));
+}
+label {
+  font-size: calc(var(--fs-min) * var(--app-font-scale, 1));
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* No heavy blur anywhere in the default theme: shadows and gradients only. */
+[class*="backdrop-blur"] {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* Money and counts line up in columns. */
+.tabular-nums,
+.font-mono,
+.data-table td {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+
+/* ------------------------------------------ 5. Cards */
+/* Main surfaces: anything the app draws as a white rounded panel (Option A tinted cards manage their own surface/border). */
+#root .bg-white:is(.rounded-xl, .rounded-2xl, .rounded-3xl):not([data-card-tone]):not(.hh-tinted):not(.fixed):not(button):not(input):not(select):not(textarea):not(span):not(label):not([role="switch"]):not([class*="size-"]):not([class~="h-8"]):not([class~="h-9"]):not([class~="h-10"]) {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  /* older screens set radius / shadow / border colour with !important; these must out-rank them */
+  border-radius: var(--r-card) !important;
+  border-color: var(--border) !important;
+  box-shadow: var(--shadow) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+/* A card inside a card is flat, so shadows never stack (except explicitly tinted cards). */
+#root .bg-white:is(.rounded-xl, .rounded-2xl, .rounded-3xl) .bg-white:is(.rounded-xl, .rounded-2xl, .rounded-3xl):not([data-card-tone]):not(.hh-tinted):not(.fixed):not(button):not(input):not(select):not(textarea):not(span):not(label):not([class*="size-"]):not([class~="h-8"]):not([class~="h-9"]):not([class~="h-10"]) {
+  border-radius: var(--r-tile) !important;
+  box-shadow: none !important;
+  background: var(--surface-soft);
+}
+.bg-slate-50,
+.bg-slate-100 {
+  background-color: var(--surface-soft);
+}
+
+
+
+/* ----------------------------------------- 6. Buttons, inputs and chips */
+button:where(:not(.rounded-full):not([role="switch"]):not([role="tab"]):not([class*="size-"]):not([class*="rounded-lg"]):not([class*="rounded-md"])) {
+  border-radius: var(--r-control);
+}
+button {
+  font-weight: 600;
+}
+/* Controls the app already shapes with rounded-lg/md/xl keep a 14px radius too. */
+button:where([class*="rounded-lg"], [class*="rounded-xl"], [class*="rounded-2xl"]):not(.rounded-full):not([role="switch"]):not([class*="size-"]) {
+  border-radius: var(--r-control);
+}
+
+/* Primary action = theme blue. Success = green, destructive = red. */
+button:is([class~="bg-slate-900"], [class~="bg-sky-600"], [class~="bg-sky-700"], [class~="bg-indigo-600"], [class~="bg-indigo-700"], [class~="bg-[#0a382c]"], [class~="bg-emerald-700"], [class~="bg-emerald-800"], [class~="bg-teal-600"], [class~="bg-teal-700"]):not([disabled]):not(.inset-0) {
+  background-color: var(--primary) !important;
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 8px 18px -10px rgba(40, 100, 217, 0.6);
+}
+button:is([class*="bg-emerald-600"], [class*="bg-green-600"], [class*="bg-green-700"]):not([disabled]) {
+  background-color: var(--received);
+  color: #fff;
+}
+button:is([class*="bg-rose-600"], [class*="bg-rose-700"], [class*="bg-red-600"], [class*="bg-red-700"]):not([disabled]) {
+  background-color: var(--due);
+  color: #fff;
+}
+button[disabled] {
+  opacity: 0.5;
+}
+/* Swipe strips clip overflow, so chips inside stay flat. */
+.no-scrollbar button,
+button.rounded-full:not([class*="size-"]):not([class*="w-1"]):not(.hh-switch) {
+  box-shadow: none !important;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+select,
+textarea {
+  min-height: var(--touch);
+  border-radius: var(--r-control);
+  border: 1px solid var(--border);
+  background-color: var(--surface);
+  color: var(--text);
+  font-weight: 400;
+  box-shadow: inset 0 1px 2px rgba(16, 29, 58, 0.04);
+}
+textarea {
+  min-height: 88px;
+}
+input::placeholder,
+textarea::placeholder {
+  color: #94a3b8;
+  font-weight: 400;
+}
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(40, 100, 217, 0.16);
+}
+/* The app-wide focus outline (App.tsx) stays for keyboard users. */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(40, 100, 217, 0.45);
+  outline-offset: 1px;
+}
+
+/* Pills and chips: pastel, subtle border. */
+.rounded-full:is(span, div):is([class*="bg-"]) {
+  font-weight: 500;
+}
+[role="tab"][aria-selected="true"] {
+  color: var(--primary);
+}
+
+/* Toggle switches keep their small size (see MOBILE_UI_CHANGES.md); just recolour. */
+[role="switch"]:not(.hh-switch)[aria-checked="true"] {
+  background-color: var(--primary);
+}
+
+
+
+
+/* -------------------------------- 9. Tailwind colour remap (old -> theme) */
+/* Text */
+.text-slate-900,
+.text-slate-800,
+.text-slate-700 {
+  color: var(--text);
+}
+.text-slate-600,
+.text-slate-500,
+.text-slate-400 {
+  color: var(--text-2);
+}
+.text-emerald-600,
+.text-emerald-700,
+.text-emerald-800,
+.text-green-600,
+.text-green-700 {
+  color: var(--received);
+}
+.text-rose-500,
+.text-rose-600,
+.text-rose-700,
+.text-rose-800,
+.text-red-600,
+.text-red-700 {
+  color: var(--due);
+}
+.text-sky-600,
+.text-sky-700,
+.text-sky-800,
+.text-blue-600,
+.text-blue-700 {
+  color: var(--sales);
+}
+.text-teal-700 {
+  color: var(--received);
+}
+.text-indigo-600,
+.text-indigo-700,
+.text-violet-600,
+.text-violet-700,
+.text-purple-600,
+.text-purple-700 {
+  color: var(--profit);
+}
+
+/* Pastel fills for status chips and info rows */
+.bg-emerald-50,
+.bg-green-50 {
+  background-color: var(--received-bg);
+}
+.bg-rose-50,
+.bg-red-50 {
+  background-color: var(--due-bg);
+}
+.bg-sky-50,
+.bg-blue-50,
+.bg-indigo-50 {
+  background-color: var(--sales-bg) !important;
+}
+.bg-violet-50,
+.bg-purple-50 {
+  background-color: var(--profit-bg);
+}
+
+/* Hairlines */
+.border-slate-100,
+.border-slate-200,
+.border-slate-300,
+[class*="border-black/"] {
+  border-color: var(--border);
+}
+.divide-slate-100 > :not(:last-child),
+.divide-slate-200 > :not(:last-child) {
+  border-color: var(--border);
+}
+
+
+/* ----------------- 10. Older warm-neutral colours -> theme */
+/* Exact class tokens only, so hover: / opacity variants keep their own behaviour. */
+:is([class~="text-[#05603A]"], [class~="text-[#059669]"], [class~="text-[#15803d]"]) {
+  color: var(--received);
+}
+:is([class~="text-[#D92D20]"], [class~="text-[#E11D48]"]) {
+  color: var(--due);
+}
+:is([class~="bg-[#faf8f5]"], [class~="bg-[#faf9f6]"]) {
+  background-color: var(--surface);
+}
+[class~="bg-[#f6f4ef]"] {
+  background-color: var(--bg);
+}
+[class~="bg-[#ebe8e1]"] {
+  background-color: #e9edfb;
+}
+[class~="bg-[#e9f1ec]"] {
+  background-color: var(--primary-soft);
+}
+
+/* Green-tinted legacy gradient panels become pastel success surfaces (Option A tinted cards & icon tiles keep their gradients). */
+[class*="bg-gradient-to-"]:is([class*="from-emerald-"], [class*="from-green-"], [class*="from-teal-"], [class*="from-mint"]):not([data-card-tone]):not(.hh-tinted):not(.hh-hero):not(.hh-icon-badge):not(.hh-avatar) {
+  background-image: none;
+  background-color: var(--received-bg);
+}
+:is([class~="border-emerald-100"], [class~="border-emerald-200"], [class~="border-emerald-300"], [class~="border-green-200"], [class~="border-teal-200"]) {
+  border-color: rgba(8, 124, 85, 0.18);
+}
+.sticky:is(.bg-slate-50, .bg-slate-100, [class~="bg-[#f6f4ef]"]) {
+  background-color: var(--bg);
+}
+
+/* ====================== PHONE + TABLET (0-1023px) ====================== */
+@media (max-width: 1023px) {
+  /* -------------------------------------------- 3. Page layout and spacing */
+  html,
+  body,
+  #root,
+  .app-shell {
+    background-color: var(--bg);
+    overflow-x: clip;
+  }
+
+  /* The one gutter lives on the wrapper App.tsx puts inside <main>. */
+  .app-content > .flex-1 {
+    padding-left: var(--page-pad);
+    padding-right: var(--page-pad);
+    padding-top: 12px;
+    padding-bottom: 16px;
+  }
+  .app-content,
+  .app-main {
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: clip;
+  }
+  .app-content :is(img, video, canvas, svg) {
+    max-width: 100%;
+  }
+  .app-content :is(pre, code) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* 20px between page sections, 12px between cards in a list. */
+  [id^="view-"]:is(.space-y-3, .space-y-4, .space-y-5, .space-y-6) > :not(:last-child) {
+    margin-block-start: 0;
+    margin-block-end: var(--gap-section);
+  }
+  .app-content :is(.space-y-2\.5, .space-y-3) > :not(:last-child) {
+    margin-block-end: var(--gap-card);
+  }
+  .app-content .grid:is(.grid-cols-2, .grid-cols-3) {
+    gap: var(--gap-card);
+  }
+
+
+  /* ------------------------------------- 4. Header and bottom navigation */
+  /* Compact back / close buttons on light surfaces (only when not explicitly styled or inside dark headers). */
+  :where(button[aria-label="Back"], button[aria-label="Close"], button[aria-label="Go back"]):not([class*="bg-"]):not([class*="hover:bg-"]):not(:is(header, .text-white, [class*="bg-[#0A1F44]"], [class*="bg-slate-900"], [class*="bg-[var(--primary)]"]) *) {
+    border-radius: var(--r-control);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-sm);
+  }
+
+
+  /* ------------------------------------- 7. Sheets, menus and dialogs */
+  /* Bottom sheets and centred dialogs. */
+  .fixed.inset-0 :is(.rounded-t-2xl, .rounded-t-3xl):is(.bg-white, [class*="bg-["]) {
+    border-radius: var(--r-card) var(--r-card) 0 0;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-up);
+  }
+  [role="dialog"] > :is(.bg-white, [class*="bg-["]):is(.rounded-2xl, .rounded-3xl, .rounded-xl) {
+    border-radius: var(--r-card);
+  }
+  .fixed.inset-0[class*="bg-slate-900/"],
+  .fixed.inset-0[class*="bg-black/"] {
+    background-color: rgba(16, 29, 58, 0.38);
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .fixed.inset-0 :is(.sm\:rounded-2xl, .sm\:rounded-3xl):is(.bg-white, [class*="bg-["]) {
+    border-radius: var(--r-card);
+  }
+}

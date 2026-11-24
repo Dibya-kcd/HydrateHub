@@ -1,0 +1,62 @@
+.hhd-mn .search{margin-top:11px;background:#fff;color:var(--mut);border-radius:99px;padding:10px 14px;font-size:12.5px;font-weight:500;display:flex;gap:8px}
+.hhd-mn .card{background:#fff;border-radius:14px;padding:13px;border:1px solid var(--line);margin-bottom:10px}
+.hhd-mn .lbl{font-size:11.5px;color:var(--mut);font-weight:600}
+.hhd-mn .tag{display:inline-block;padding:3px 8px;border-radius:99px;font-size:10.5px;font-weight:700;background:#e6f1fc;color:var(--navy)}
+.hhd-mn .tag.y{background:#fff3cc;color:#7a5b00}
+.hhd-mn .btn{display:block;text-align:center;background:var(--blue);color:#fff;font-weight:700;border-radius:99px;padding:12px;font-size:13px}
+.hhd-mn .btn.o{background:#fff;color:var(--blue);border:1.5px solid var(--blue)}
+.hhd-mn .meter{height:6px;background:#e9ecef;border-radius:9px;overflow:hidden;margin-top:11px}
+.hhd-mn .meter i{display:block;height:100%;background:var(--blue);border-radius:9px}
+.hhd-mn .three{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.hhd-mn .three div{font-size:10.5px;color:var(--mut);font-weight:600}
+.hhd-mn .three b{display:block;font-size:14px;color:var(--ink);margin-top:2px}
+.hhd-mn .rowi{display:flex;align-items:center;gap:11px;padding:11px 0;border-bottom:1px solid #eef0f2}
+.hhd-mn .rowi:last-child{border:0}
+.hhd-mn .ico{width:38px;height:38px;border-radius:50%;background:#e6f1fc;display:grid;place-items:center;font-size:16px;flex:none}
+.hhd-mn .chips{display:flex;gap:6px;overflow:hidden;margin:0 0 10px}
+.hhd-mn .chip{padding:7px 13px;border-radius:99px;background:#fff;border:1px solid var(--line);font-weight:600;font-size:11.5px;white-space:nowrap}
+.hhd-mn .chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.hhd-mn .pills{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.hhd-mn .pills span{text-align:center;padding:10px 0;border-radius:12px;border:1.5px solid var(--line);background:#fff;font-weight:700;font-size:12px}
+.hhd-mn .pills span.on{border-color:var(--blue);background:#e6f1fc;color:var(--navy)}
+.hhd-mn .ln{display:flex;justify-content:space-between;padding:5px 0;font-size:12.5px}
+.hhd-mn .st2{display:flex;border:1.5px solid var(--blue);border-radius:99px;overflow:hidden;font-weight:800;color:var(--blue);font-size:12px}
+.hhd-mn .st2 span{padding:5px 9px}
+.hhd-mn .st2 span:nth-child(2){background:var(--blue);color:#fff}
+.hhd-mn .fx{display:flex;gap:6px}
+.hhd-mn .fx>*{flex:1}
+.hhd-mn .sw{width:42px;height:24px;border-radius:99px;background:var(--blue);position:relative;flex:none}
+.hhd-mn .sw:after{content:"";position:absolute;right:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff}
+.hhd-mn .in{background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin-bottom:7px}
+.hhd-mn .in small{display:block;font-size:10px;color:var(--mut);font-weight:700}
+.hhd-mn .in b{font-size:13px;font-weight:600}
+.hhd-mn .in.f{border-color:var(--blue);box-shadow:0 0 0 3px #e6f1fc}
+.hhd-mn .rowsw{display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:12.5px;font-weight:600}
+.hhd-mn .pdt{display:flex;gap:10px;justify-content:center;margin:8px 0 10px}
+.hhd-mn .pdt i{width:14px;height:14px;border-radius:50%;border:2px solid #c3c8cf;display:block}
+.hhd-mn .pdt i.f{background:var(--blue);border-color:var(--blue)}
+.hhd-mn .lnk{color:var(--blue);font-weight:700;font-size:12px;text-align:center;margin-top:8px}
+.hhd-mn{background:#f1f3f6;border:1px solid var(--line);border-radius:16px;overflow:hidden;position:relative;height:172px;font-size:11px;margin-bottom:10px}
+.hhd-mn .mt{background:#0071dc;color:#fff;padding:7px 11px;font-weight:800;font-size:11.5px;display:flex;justify-content:space-between}
+.hhd-mn .mb{padding:8px 10px}
+.hhd-mn .card{padding:7px 10px;margin-bottom:5px;border-radius:10px}
+.hhd-mn .btn{padding:8px;font-size:11px;margin-top:4px}
+.hhd-mn .rowi{padding:5px 0;gap:8px}
+.hhd-mn .ico{width:26px;height:26px;font-size:12px}
+.hhd-mn .lbl{font-size:10px}
+.hhd-mn .chip{padding:4px 9px;font-size:10px}
+.hhd-mn .chips{margin:0 0 6px}
+.hhd-mn .in{padding:5px 9px;margin-bottom:5px;border-radius:9px}
+.hhd-mn .in small{font-size:9px}
+.hhd-mn .in b{font-size:11.5px}
+.hhd-mn .ln{padding:2px 0;font-size:11px}
+.hhd-mn .pills span{padding:6px 0;font-size:10.5px}
+.hhd-mn .three{margin-top:6px;padding-top:6px}
+.hhd-mn .three b{font-size:12px}
+.hhd-mn .tap{position:absolute;width:34px;height:34px;border-radius:50%;background:rgba(255,194,32,.4);border:2px solid #ffc220;display:grid;place-items:center;font-size:15px;z-index:3;box-shadow:0 0 0 6px rgba(255,194,32,.18)}
+.hhd-mn .hl{outline:2px solid #ffc220;outline-offset:1px;background:#fffaf0!important}
+.hhd-mn .chp{display:flex;gap:4px;margin:6px 0 2px}
+.hhd-mn .chp i{flex:1;font-style:normal;text-align:center;font-size:8.5px;font-weight:800;padding:5px 1px;border-radius:7px;background:#fff;border:1px solid var(--line);color:#5f6672}
+.hhd-mn .chp i.on{background:#0071dc;color:#fff;border-color:#0071dc}
+/* A highlighted filled button keeps readable text (the pale highlight would hide white text). */
+.hhd-mn .btn.hl { color: var(--navy); border: 1.5px solid #ffc220; }

@@ -1,0 +1,25 @@
+node_modules/
+dist/
+dev-dist/
+.env
+.env.local
+.env.*
+!.env.example
+# Server runtime cache of your live data: never ship or commit it (a stale copy overrides the database)
+data/
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Capacitor / native build outputs
+android/app/build/
+ios/App/build/
+Payload/
+*.apk
+*.ipa
+# Transient test output PDFs
+Receipt_*.pdf
+# Runtime-generated alternate lockfile (repo uses package-lock.json)
+bun.lock
+

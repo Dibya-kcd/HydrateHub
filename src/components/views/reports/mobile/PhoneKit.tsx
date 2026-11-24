@@ -1,0 +1,654 @@
+import React, { useState } from 'react';
+import type { ReportPeriod } from '../reportPeriod';
+import { 
+  ChevronLeft, 
+  FileSpreadsheet, 
+  FileText, 
+  Loader2, 
+  Search, 
+  X, 
+  SlidersHorizontal, 
+  ChevronDown,
+  Check,
+} from 'lucide-react';
+
+/**
+ * Phone look for the money reports (Customer receipts, Daily collection, Beat-wise sales & due,
+ * Product profit): one big headline number, plain words, colour for status
+ * (green = paid, red = due, amber = late), big tap targets, filter chips instead of small controls,
+ * and Excel / PDF always pinned at the bottom.
+ *
+ * These pieces are used inside `md:hidden` blocks. Tablet and desktop keep their existing layouts.
+ */
+
+/** Whole rupees when the amount is whole, otherwise two decimals: ₹1,84,250 / ₹1,250.50 */
+export const rs = (n: number): string => {
+  const v = Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+  const abs = Math.abs(v);
+  const whole = Math.abs(abs - Math.round(abs)) < 0.005;
+  const sign = v < -0.004 ? '−' : '';
+  return `${sign}₹${abs.toLocaleString('en-IN', {
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  })}`;
+};
+
+/** "1.7L" / "16.4k" style short rupees for tight tiles. */
+export const rsShort = (n: number): string => {
+  const a = Math.abs(n);
+  const sign = n < 0 ? '−' : '';
+  if (a >= 10000000) return `${sign}₹${(a / 10000000).toFixed(1).replace(/\.0$/, '')}Cr`;
+  if (a >= 100000) return `${sign}₹${(a / 100000).toFixed(1).replace(/\.0$/, '')}L`;
+  if (a >= 10000) return `${sign}₹${(a / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return `${sign}${rs(a)}`;
+};
+
+/* ---------- header ---------- */
+
+export const PhoneHeader: React.FC<{
+  title: string;
+  sub?: React.ReactNode;
+  right?: React.ReactNode;
+  onBack?: () => void;
+}> = ({ title, sub, right, onBack }) => (
+  <div className="flex items-center gap-3">
+    {onBack && (
+      <button
+        type="button"
+        onClick={onBack}
+        aria-label="Back"
+        className="size-10 shrink-0 rounded-2xl border border-blue-100/90 bg-white flex items-center justify-center text-slate-700 cursor-pointer active:scale-95 transition-all shadow-xs"
+      >
+        <ChevronLeft size={18} aria-hidden="true" />
+      </button>
+    )}
+    <div className="min-w-0 flex-1">
+      <h2 className="text-lg font-extrabold text-slate-900 leading-tight tracking-tight break-words">{title}</h2>
+      {sub && <p className="text-xs text-slate-500 mt-0.5 break-words font-medium">{sub}</p>}
+    </div>
+    {right}
+  </div>
+);
+
+/* ---------- hero card ---------- */
+
+const HERO_TONE = {
+  green: 'bg-gradient-to-br from-[#0b224b] via-[#133b86] to-[#1d51b8] text-white shadow-xl shadow-blue-950/25 border border-blue-300/20',
+  navy: 'bg-gradient-to-br from-[#0b224b] via-[#143a85] to-[#1d51b8] text-white shadow-xl shadow-blue-950/25 border border-blue-300/20',
+  red: 'bg-gradient-to-br from-[#9f1239] via-[#be123c] to-[#881337] text-white shadow-xl shadow-rose-950/25 border border-rose-300/20',
+  /** Profit = royal violet, matching `MetricCard tone="profit"` */
+  profit: 'bg-gradient-to-br from-[#5b21b6] via-[#6d28d9] to-[#4c1d95] text-white shadow-xl shadow-violet-950/25 border border-violet-300/20',
+} as const;
+
+export const HeroCard: React.FC<{
+  tone?: keyof typeof HERO_TONE;
+  label: string;
+  value: string;
+  negative?: boolean;
+  action?: React.ReactNode;
+  children?: React.ReactNode;
+}> = ({ tone = 'green', label, value, negative, action, children }) => (
+  <div className={`rounded-3xl p-5 ${HERO_TONE[tone]}`}>
+    <div className="flex items-center justify-between gap-2">
+      <div className="text-xs font-bold uppercase tracking-[0.12em] text-white/70">{label}</div>
+      {action}
+    </div>
+    <div className={`mt-2 text-3xl sm:text-4xl leading-none font-extrabold tabular-nums tracking-tight ${negative ? 'text-rose-300' : 'text-white'}`}>{value}</div>
+    {children && <div className="mt-3.5 space-y-2.5">{children}</div>}
+  </div>
+);
+
+export interface BarPart {
+  value: number;
+  /** Tailwind background class */
+  className: string;
+}
+
+/** Thick multi-colour bar. Renders nothing when every part is 0. */
+export const SplitBar: React.FC<{ parts: BarPart[]; label: string; trackClass?: string }> = ({
+  parts,
+  label,
+  trackClass = 'bg-white/15',
+}) => {
+  const total = parts.reduce((t, p) => t + Math.max(0, p.value), 0);
+  if (total <= 0) return null;
+  return (
+    <div className={`flex h-2.5 rounded-full overflow-hidden ${trackClass}`} role="img" aria-label={label}>
+      {parts.map((p, i) => (
+        <div key={i} className={p.className} style={{ width: `${(Math.max(0, p.value) * 100) / total}%` }} />
+      ))}
+    </div>
+  );
+};
+
+export const LegendDot: React.FC<{ dot: string; children: React.ReactNode }> = ({ dot, children }) => (
+  <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+    <span className={`size-2.5 rounded-full ${dot}`} aria-hidden="true" />
+    {children}
+  </span>
+);
+
+/* ---------- controls ---------- */
+
+export interface ChipOption<T extends string> {
+  id: T;
+  label: string;
+}
+
+/** Filter chips: one line, swipe sideways when there are many. Active chip is dark. */
+export function Chips<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+  trailing,
+}: {
+  options: ChipOption<T>[];
+  value: T;
+  onChange: (v: T) => void;
+  label: string;
+  /** Extra control shown after the chips inside the same swipe row (e.g. a godown picker). */
+  trailing?: React.ReactNode;
+}) {
+  return (
+    <div className="flex gap-2 overflow-x-auto no-scrollbar -mx-0.5 px-0.5 py-0.5" role="group" aria-label={label}>
+      {options.map((o) => {
+        const on = o.id === value;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            aria-pressed={on}
+            onClick={() => onChange(o.id)}
+            className={`shrink-0 min-h-[44px] px-4 rounded-full border text-[13px] font-bold whitespace-nowrap cursor-pointer transition-colors ${
+              on ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-800 border-slate-200 active:bg-slate-100'
+            }`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+      {trailing}
+    </div>
+  );
+}
+
+/**
+ * Sort / filter as a single dropdown (avoids long pill rows that overflow on phone).
+ * Prefer this over Chips when the control is a sort order.
+ */
+export function SortSelect<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+}: {
+  options: ChipOption<T>[];
+  value: T;
+  onChange: (v: T) => void;
+  label: string;
+}) {
+  const current = options.find((o) => o.id === value)?.label || label;
+  return (
+    <div className="relative w-full">
+      <label className="sr-only" htmlFor={`sort-select-${label}`}>
+        {label}
+      </label>
+      <select
+        id={`sort-select-${label}`}
+        aria-label={label}
+        value={value}
+        onChange={(e) => onChange(e.target.value as T)}
+        className="w-full appearance-none min-h-[44px] pl-3.5 pr-10 rounded-xl border border-slate-200 bg-white text-[13px] font-bold text-slate-800 shadow-xs focus:outline-none focus:ring-2 focus:ring-emerald-600/30 focus:border-emerald-600 cursor-pointer"
+      >
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.label.startsWith('Sort') ? o.label : `Sort: ${o.label}`}
+          </option>
+        ))}
+      </select>
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs font-bold">
+        ▼
+      </span>
+      <span className="sr-only">{current}</span>
+    </div>
+  );
+}
+
+/** Two-way big switch (By day / By customer). */
+export function BigSwitch<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+}: {
+  options: ChipOption<T>[];
+  value: T;
+  onChange: (v: T) => void;
+  label: string;
+}) {
+  return (
+    <div className="flex gap-1 p-1 rounded-2xl bg-slate-100 border border-slate-200" role="tablist" aria-label={label}>
+      {options.map((o) => {
+        const on = o.id === value;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            role="tab"
+            aria-selected={on}
+            onClick={() => onChange(o.id)}
+            className={`flex-1 min-h-[46px] rounded-xl text-[14px] font-bold cursor-pointer transition-colors ${
+              on ? 'bg-[var(--primary)] text-white shadow-sm' : 'text-slate-600 active:bg-slate-200'
+            }`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export const PhoneSearch: React.FC<{ value: string; onChange: (v: string) => void; placeholder: string }> = ({
+  value,
+  onChange,
+  placeholder,
+}) => (
+  <div className="relative">
+    <Search size={18} className="text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" aria-hidden="true" />
+    <input
+      type="text"
+      enterKeyHint="search"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="w-full min-h-[48px] pl-10 pr-10 text-[15px] rounded-2xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700/30 focus:border-emerald-700 placeholder:text-slate-400"
+    />
+    {value && (
+      <button
+        type="button"
+        aria-label="Clear search"
+        onClick={() => onChange('')}
+        className="absolute right-1.5 top-1/2 -translate-y-1/2 size-10 flex items-center justify-center text-slate-400 cursor-pointer"
+      >
+        <X size={16} />
+      </button>
+    )}
+  </div>
+);
+
+/* ---------- small pieces ---------- */
+
+const TAG = {
+  green: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+  red: 'bg-rose-50 text-rose-700 border-rose-200',
+  amber: 'bg-amber-50 text-amber-800 border-amber-200',
+  blue: 'bg-sky-50 text-sky-800 border-sky-200',
+  grey: 'bg-slate-100 text-slate-700 border-slate-200',
+} as const;
+
+export const Tag: React.FC<{ tone?: keyof typeof TAG; children: React.ReactNode }> = ({ tone = 'grey', children }) => (
+  <span className={`inline-flex items-center px-2.5 py-1 rounded-full border text-xs font-bold leading-none ${TAG[tone]}`}>
+    {children}
+  </span>
+);
+
+const TILE = {
+  green: 'hh-icon-badge hh-icon-badge--green',
+  blue: 'hh-icon-badge hh-icon-badge--blue',
+  red: 'hh-icon-badge hh-icon-badge--rose',
+  grey: 'hh-icon-badge hh-icon-badge--slate',
+} as const;
+
+/** Vivid solid squircle icon badge at the left of a report row. */
+export const IconTile: React.FC<{ tone: keyof typeof TILE; children: React.ReactNode }> = ({ tone, children }) => (
+  <div className={`size-11 shrink-0 rounded-2xl flex items-center justify-center text-lg font-bold ${TILE[tone]}`} aria-hidden="true">
+    {children}
+  </div>
+);
+
+/** Clean frosted mini stat tile inside a tinted report card. */
+export const MiniStat: React.FC<{ label: string; value: React.ReactNode; tone?: 'ink' | 'green' | 'red' | 'amber' | 'profit' }> = ({
+  label,
+  value,
+  tone = 'ink',
+}) => {
+  const c = { ink: 'text-slate-900', green: 'text-emerald-700', red: 'text-rose-700', amber: 'text-amber-700', profit: 'text-violet-700' }[tone];
+  const bg = {
+    ink: 'bg-white/75 border-slate-200/70',
+    green: 'bg-emerald-50/90 border-emerald-200/70',
+    red: 'bg-rose-50/90 border-rose-200/70',
+    amber: 'bg-amber-50/90 border-amber-200/70',
+    profit: 'bg-violet-50/90 border-violet-200/70',
+  }[tone];
+  return (
+    <div className={`rounded-xl px-2.5 py-2 min-w-0 border ${bg}`}>
+      <div className="text-xs font-semibold text-slate-600 leading-tight">{label}</div>
+      <div className={`text-[15px] font-extrabold tabular-nums leading-tight mt-0.5 ${c}`}>{value}</div>
+    </div>
+  );
+};
+
+/** Option A Soft Tinted Fintech list card (replaces plain white + harsh left edge stripe). */
+export const RowCard: React.FC<{
+  children: React.ReactNode;
+  /** Semantic tint: green (paid/received), amber (partial/warning), red (due/loss), default cool sky tint */
+  edge?: 'green' | 'amber' | 'red';
+  tone?: 'sales' | 'received' | 'due' | 'warning' | 'profit' | 'neutral';
+  className?: string;
+}> = ({ children, edge, tone, className = '' }) => {
+  const cardTone =
+    tone ?? (edge === 'green' ? 'received' : edge === 'amber' ? 'warning' : edge === 'red' ? 'due' : 'sales');
+  return (
+    <div
+      data-card-tone={cardTone}
+      className={`relative overflow-hidden rounded-2xl shadow-sm ${className}`}
+    >
+      {children}
+    </div>
+  );
+};
+
+export const DayHeading: React.FC<{ left: string; right?: string }> = ({ left, right }) => (
+  <div className="flex items-baseline justify-between gap-3 px-1 pt-1">
+    <span className="text-[15px] font-extrabold text-slate-900">{left}</span>
+    {right && <span className="text-xs text-slate-500 tabular-nums">{right}</span>}
+  </div>
+);
+
+export const EmptyNote: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div data-card-tone="neutral" className="rounded-2xl py-10 px-4 text-center text-sm text-slate-600 font-medium">{children}</div>
+);
+
+/** "Wed, 4 Nov" */
+export const fmtDayShort = (d: string): string => {
+  const dt = new Date(`${d}T12:00:00`);
+  return isNaN(dt.getTime()) ? d : dt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+};
+
+/* ---------- bottom Excel / PDF bar ---------- */
+
+/**
+ * Excel and PDF, always at the bottom (fixed just above the bottom navigation).
+ * Place it once at the end of a phone block; it adds its own spacer so the last row is never hidden.
+ */
+export const PhoneDownloadBar: React.FC<{
+  onExcel: () => Promise<void> | void;
+  onPdf: () => Promise<void> | void;
+  disabled?: boolean;
+}> = ({ onExcel, onPdf, disabled }) => {
+  const [busy, setBusy] = useState<'xlsx' | 'pdf' | null>(null);
+  const [err, setErr] = useState('');
+
+  const run = async (kind: 'xlsx' | 'pdf', fn: () => Promise<void> | void) => {
+    setBusy(kind);
+    setErr('');
+    try {
+      await fn();
+    } catch (e) {
+      console.error('Report download failed', e);
+      setErr('Download failed. Please try again.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="h-32" aria-hidden="true" />
+      <div className="hh-phone-dlbar fixed inset-x-0 z-40 bottom-[calc(5.75rem+env(safe-area-inset-bottom,0px))] px-3 py-2.5 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-[0_-4px_16px_rgba(0,0,0,0.08)]">
+        {err && <div className="text-xs text-rose-700 text-center pb-1">{err}</div>}
+        <div className="flex gap-2.5">
+          <button
+            type="button"
+            disabled={disabled || busy !== null}
+            onClick={() => run('xlsx', onExcel)}
+            aria-label="Download Excel"
+            className="flex-1 min-h-[50px] rounded-2xl border-2 border-[var(--primary)] bg-white text-[var(--primary)] text-[15px] font-bold inline-flex items-center justify-center gap-2 cursor-pointer active:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy === 'xlsx' ? <Loader2 size={18} className="animate-spin" /> : <FileSpreadsheet size={18} className="hh-dl-static-icon" />}
+            Excel
+          </button>
+          <button
+            type="button"
+            disabled={disabled || busy !== null}
+            onClick={() => run('pdf', onPdf)}
+            aria-label="Download PDF"
+            className="flex-1 min-h-[50px] rounded-2xl border-2 border-[var(--primary)] bg-[var(--primary)] text-white text-[15px] font-bold inline-flex items-center justify-center gap-2 cursor-pointer active:bg-[#093d2e] disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy === 'pdf' ? <Loader2 size={18} className="animate-spin" /> : <FileText size={18} className="hh-dl-static-icon" />}
+            PDF
+          </button>
+        </div>
+      </div>
+    </>
+  );
+};
+
+/* ---------- Unified Search + Filter Bar & Bottom Sheet (Daily Collection style) ---------- */
+
+export const UnifiedPhoneFilterBar: React.FC<{
+  search: string;
+  onSearch: (v: string) => void;
+  placeholder?: string;
+  onOpenFilter: () => void;
+  activeFilterCount?: number;
+  showFilterButton?: boolean;
+}> = ({
+  search,
+  onSearch,
+  placeholder = 'Search…',
+  onOpenFilter,
+  activeFilterCount = 0,
+  showFilterButton = true,
+}) => (
+  <div className="bg-white rounded-2xl border border-blue-100/90 shadow-xs px-3.5 py-2.5 flex items-center justify-between gap-2">
+    <div className="flex items-center gap-2 flex-1 min-w-0">
+      <Search size={18} className="text-slate-400 shrink-0" />
+      <input
+        type="text"
+        enterKeyHint="search"
+        value={search}
+        onChange={(e) => onSearch(e.target.value)}
+        placeholder={placeholder}
+        className="w-full text-xs sm:text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none bg-transparent"
+      />
+      {search && (
+        <button
+          type="button"
+          aria-label="Clear search"
+          onClick={() => onSearch('')}
+          className="text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer shrink-0"
+        >
+          <X size={15} />
+        </button>
+      )}
+    </div>
+
+    {showFilterButton && (
+      <>
+        <div className="h-5 w-px bg-slate-200 mx-1 shrink-0" />
+        <button
+          type="button"
+          onClick={onOpenFilter}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl transition-all shrink-0 cursor-pointer font-bold text-xs sm:text-sm ${
+            activeFilterCount > 0
+              ? 'bg-blue-50 text-blue-700'
+              : 'text-blue-600 hover:bg-blue-50 active:scale-95'
+          }`}
+        >
+          <SlidersHorizontal size={15} className="text-blue-600 stroke-[2.2]" />
+          <span>Filter</span>
+          {activeFilterCount > 0 ? (
+            <span className="w-4 h-4 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center ml-0.5">
+              {activeFilterCount}
+            </span>
+          ) : (
+            <ChevronDown size={14} className="text-blue-600 stroke-[2.5]" />
+          )}
+        </button>
+      </>
+    )}
+  </div>
+);
+
+export const PhoneFilterBottomSheet: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  title?: string;
+  onReset?: () => void;
+  activeCount?: number;
+  children: React.ReactNode;
+  onApply?: () => void;
+  applyLabel?: string;
+}> = ({
+  isOpen,
+  onClose,
+  title = 'Filters',
+  onReset,
+  activeCount = 0,
+  children,
+  onApply,
+  applyLabel = 'Apply Filters',
+}) => {
+  if (!isOpen) return null;
+  return (
+    <div data-esc-close
+      className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-200"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl p-5 space-y-4 max-h-[88vh] overflow-y-auto animate-in slide-in-from-bottom duration-300 text-slate-900"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Sheet Header */}
+        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <SlidersHorizontal size={18} className="text-blue-600" />
+            <h3 className="text-base font-extrabold text-slate-900">{title}</h3>
+          </div>
+          <div className="flex items-center gap-3">
+            {onReset && activeCount > 0 && (
+              <button
+                type="button"
+                onClick={onReset}
+                className="text-xs font-bold text-rose-600 hover:underline cursor-pointer"
+              >
+                Reset
+              </button>
+            )}
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={onClose}
+              className="size-8 rounded-full bg-slate-100 text-slate-500 hover:text-slate-800 flex items-center justify-center cursor-pointer"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="space-y-4">{children}</div>
+
+        {/* Apply Button */}
+        <div className="pt-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (onApply) onApply();
+              onClose();
+            }}
+            className="w-full py-3 px-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm shadow-md shadow-blue-600/25 transition-all flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <Check size={18} />
+            <span>{applyLabel}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+
+/* ---------- Date period section for the filter sheet (same as Daily Collection) ---------- */
+
+/** Everything a report needs to let the phone filter sheet change the date period. */
+export interface PhonePeriodControl {
+  period: ReportPeriod;
+  onPeriodChange: (p: ReportPeriod) => void;
+  startDate: string;
+  endDate: string;
+  onCustomRangeChange: (start: string, end: string) => void;
+}
+
+const PERIOD_PRESETS: { id: ReportPeriod; label: string }[] = [
+  { id: 'today', label: 'Today' },
+  { id: 'yesterday', label: 'Yesterday' },
+  { id: 'last7', label: 'Last 7 days' },
+  { id: 'thisMonth', label: 'This month' },
+  { id: 'all', label: 'All time' },
+  { id: 'customRange', label: 'Custom range' },
+];
+
+/** The default period for reports. A different period counts as an active filter. */
+export const isPeriodFilterActive = (period: ReportPeriod): boolean => period !== 'thisMonth' && period !== 'all';
+
+/** "Date Period" block: preset buttons plus From / To pickers for a custom range. */
+export const PhonePeriodPicker: React.FC<PhonePeriodControl> = ({
+  period,
+  onPeriodChange,
+  startDate,
+  endDate,
+  onCustomRangeChange,
+}) => (
+  <div className="space-y-2">
+    <label className="text-xs font-bold uppercase tracking-wider text-slate-500">Date Period</label>
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+      {PERIOD_PRESETS.map((p) => {
+        const on = period === p.id;
+        return (
+          <button
+            key={p.id}
+            type="button"
+            aria-pressed={on}
+            onClick={() => (p.id === 'customRange' ? onCustomRangeChange(startDate, endDate) : onPeriodChange(p.id))}
+            className={`px-3 py-2 rounded-xl text-xs font-bold border transition-colors text-center cursor-pointer ${
+              on ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+            }`}
+          >
+            {p.label}
+          </button>
+        );
+      })}
+    </div>
+    {period === 'customRange' && (
+      <div className="grid grid-cols-2 gap-2 pt-1">
+        <div>
+          <label className="text-xs font-semibold text-slate-500 block mb-1">From Date</label>
+          <input
+            type="date"
+            value={startDate}
+            max={endDate || undefined}
+            onChange={(e) => onCustomRangeChange(e.target.value, endDate)}
+            className="w-full text-xs font-bold p-2 border border-slate-200 rounded-xl bg-slate-50 text-slate-800"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-slate-500 block mb-1">To Date</label>
+          <input
+            type="date"
+            value={endDate}
+            min={startDate || undefined}
+            onChange={(e) => onCustomRangeChange(startDate, e.target.value)}
+            className="w-full text-xs font-bold p-2 border border-slate-200 rounded-xl bg-slate-50 text-slate-800"
+          />
+        </div>
+      </div>
+    )}
+  </div>
+);
