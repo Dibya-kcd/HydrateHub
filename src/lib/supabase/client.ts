@@ -102,10 +102,10 @@ export function getSupabaseConfig(): SupabaseConfig {
   }
   const envUrl =
     import.meta.env.VITE_SUPABASE_URL ||
-    "https://psizakmtxppariejawbd.supabase.co";
+    "https://pqjvumdrybjqxrqstams.supabase.co";
   const envKey =
     import.meta.env.VITE_SUPABASE_ANON_KEY ||
-    "sb_publishable_3D3tfJOS10gkL0lJ6qQT1Q_Lvux1S9W";
+    "sb_publishable_pslHsy59H0ZdQUf72FbOkg_U21bvBQk";
 
   let customUrl = "";
   let customKey = "";
@@ -135,11 +135,11 @@ export function getSupabaseConfig(): SupabaseConfig {
     finalKey.startsWith("missing-") ||
     finalKey.trim() === "";
 
-  let projectRef = "psizakmtxppariejawbd";
+  let projectRef = "pqjvumdrybjqxrqstams";
   try {
     if (finalUrl) {
       const parsedUrl = new URL(finalUrl);
-      projectRef = parsedUrl.hostname.split(".")[0] || "psizakmtxppariejawbd";
+      projectRef = parsedUrl.hostname.split(".")[0] || "pqjvumdrybjqxrqstams";
     }
   } catch {
     // fallback
@@ -204,57 +204,75 @@ export function clearSupabaseCustomConfig(): void {
   }
 }
 
+export const MONITORED_DB_TABLES = [
+  "warehouses",
+  "products",
+  "inventory_batches",
+  "stock_transfers",
+  "promotions",
+  "bills",
+  "trips",
+  "audits",
+  "organization_profile",
+  "billing_settings",
+  "inventory_items",
+  "app_collections",
+  "salesmen",
+  "grns",
+  "grn_edit_log",
+  "payments",
+  "payment_history",
+  "activity_logs",
+  "inventory_dispositions",
+  "supplier_schemes",
+  "supplier_scheme_applications",
+  "supplier_credit_notes",
+  "audit_sessions",
+  "reconciliation_transactions",
+  "stock_ledger_entries",
+  "orders",
+  "promotional_schemes",
+] as const;
+
+export type MonitoredDbTable = (typeof MONITORED_DB_TABLES)[number];
+
 export interface ConnectionTestResult {
   connected: boolean;
   url: string;
   projectRef: string;
   latencyMs: number;
-  tablesReady: {
-    warehouses: boolean;
-    products: boolean;
-    inventory_batches: boolean;
-    stock_transfers: boolean;
-    promotions: boolean;
-    bills: boolean;
-    trips: boolean;
-    audits: boolean;
-    organization_profile: boolean;
-    billing_settings: boolean;
-    inventory_items?: boolean;
-    app_collections?: boolean;
-    salesmen?: boolean;
-  };
+  tablesReady: Record<string, boolean>;
+  missingTables?: string[];
   allTablesExist: boolean;
   message: string;
   error?: string;
 }
 
+export function buildEmptyTablesStatus(): Record<string, boolean> {
+  return Object.fromEntries(MONITORED_DB_TABLES.map((t) => [t, false]));
+}
+
 export async function testSupabaseConnection(): Promise<ConnectionTestResult> {
-  const emptyTables = {
-    warehouses: false,
-    products: false,
-    inventory_batches: false,
-    stock_transfers: false,
-    promotions: false,
-    bills: false,
-    trips: false,
-    audits: false,
-    organization_profile: false,
-    billing_settings: false,
-    salesmen: false,
-  };
+  const emptyTables = buildEmptyTablesStatus();
 
   if (isServerProxyMode()) {
     const startTime = Date.now();
     const res = await proxyFetch<any>("/api/supabase/health", { method: "GET" });
     if (res.ok && res.data) {
       const d = res.data;
+      const tablesReady: Record<string, boolean> = d.tablesReady || emptyTables;
+      const missingTables: string[] = Array.isArray(d.missingTables)
+        ? d.missingTables
+        : Object.entries(tablesReady)
+            .filter(([, ok]) => !ok)
+            .map(([name]) => name);
       return {
         connected: Boolean(d.connected),
         url: d.url || "/api",
         projectRef: d.projectRef || "server-proxy",
         latencyMs: Number(d.latencyMs ?? Date.now() - startTime),
-        tablesReady: d.tablesReady || emptyTables,
+        tablesReady,
+        missingTables,
         allTablesExist: Boolean(d.allTablesExist),
         message:
           d.message ||
@@ -268,6 +286,7 @@ export async function testSupabaseConnection(): Promise<ConnectionTestResult> {
       projectRef: "server-proxy",
       latencyMs: Date.now() - startTime,
       tablesReady: emptyTables,
+      missingTables: [...MONITORED_DB_TABLES],
       allTablesExist: false,
       message: res.error || "Unable to verify Supabase connection via server proxy.",
       error: res.error,
@@ -284,6 +303,7 @@ export async function testSupabaseConnection(): Promise<ConnectionTestResult> {
       projectRef: config.projectRef,
       latencyMs: 0,
       tablesReady: emptyTables,
+      missingTables: [...MONITORED_DB_TABLES],
       allTablesExist: false,
       message:
         "Local-first storage is active. Cloud synchronization requires custom Supabase credentials.",
@@ -296,22 +316,26 @@ export async function testSupabaseConnection(): Promise<ConnectionTestResult> {
   try {
     const checkTable = async (tableName: string): Promise<boolean> => {
       try {
-        const checkPromise = client.from(tableName).select("id").limit(1);
+        const probeColumn = tableName === "app_collections" ? "key" : "id";
+        const checkPromise = client.from(tableName).select(probeColumn).limit(1);
         const timeoutPromise = new Promise<{ error: any }>((resolve) =>
-          setTimeout(() => resolve({ error: { message: "timeout" } }), 2000),
+          setTimeout(() => resolve({ error: { message: "timeout" } }), 2500),
         );
         const { error } = await Promise.race([checkPromise, timeoutPromise]);
         if (error) {
+          const msg = String(error.message || "");
           if (
             error.code === "PGRST205" ||
-            String(error.message || "").includes("Could not find the table")
+            error.code === "42P01" ||
+            msg.includes("Could not find the table") ||
+            msg.includes("does not exist")
           ) {
             return false;
           }
           if (
-            String(error.message || "").includes("520") ||
-            String(error.message || "").includes("timeout") ||
-            String(error.message || "").includes("<!DOCTYPE")
+            msg.includes("520") ||
+            msg.includes("timeout") ||
+            msg.includes("<!DOCTYPE")
           ) {
             return false;
           }
@@ -322,60 +346,24 @@ export async function testSupabaseConnection(): Promise<ConnectionTestResult> {
       }
     };
 
-    const overallCheck = Promise.all([
-      checkTable("warehouses"),
-      checkTable("products"),
-      checkTable("inventory_batches"),
-      checkTable("stock_transfers"),
-      checkTable("promotions"),
-      checkTable("bills"),
-      checkTable("trips"),
-      checkTable("audits"),
-      checkTable("organization_profile"),
-      checkTable("billing_settings"),
-      checkTable("inventory_items"),
-      checkTable("app_collections"),
-      checkTable("salesmen"),
-    ]);
-
-    const overallTimeout = new Promise<boolean[]>((_, reject) =>
-      setTimeout(() => reject(new Error("Supabase connection timeout")), 3500),
+    const overallCheck = Promise.all(
+      MONITORED_DB_TABLES.map((tableName) => checkTable(tableName)),
     );
 
-    const [
-      whOk,
-      productsOk,
-      batchesOk,
-      transfersOk,
-      promosOk,
-      billsOk,
-      tripsOk,
-      auditsOk,
-      orgOk,
-      settingsOk,
-      invItemsOk,
-      collectionsOk,
-      salesmenOk,
-    ] = await Promise.race([overallCheck, overallTimeout]);
+    const overallTimeout = new Promise<boolean[]>((_, reject) =>
+      setTimeout(() => reject(new Error("Supabase connection timeout")), 5000),
+    );
+
+    const results = await Promise.race([overallCheck, overallTimeout]);
 
     const latencyMs = Date.now() - startTime;
-    const tablesReady = {
-      warehouses: whOk,
-      products: productsOk,
-      inventory_batches: batchesOk,
-      stock_transfers: transfersOk,
-      promotions: promosOk,
-      bills: billsOk,
-      trips: tripsOk,
-      audits: auditsOk,
-      organization_profile: orgOk,
-      billing_settings: settingsOk,
-      inventory_items: invItemsOk,
-      app_collections: collectionsOk,
-      salesmen: salesmenOk,
-    };
+    const tablesReady: Record<string, boolean> = {};
+    MONITORED_DB_TABLES.forEach((name, idx) => {
+      tablesReady[name] = Boolean(results[idx]);
+    });
 
-    const allTablesExist = Object.values(tablesReady).every(Boolean);
+    const missingTables = MONITORED_DB_TABLES.filter((name) => !tablesReady[name]);
+    const allTablesExist = missingTables.length === 0;
 
     return {
       connected: true,
@@ -383,10 +371,11 @@ export async function testSupabaseConnection(): Promise<ConnectionTestResult> {
       projectRef: config.projectRef,
       latencyMs,
       tablesReady,
+      missingTables,
       allTablesExist,
       message: allTablesExist
         ? "Connected to Supabase PostgreSQL database. All tables, warehouse schemas, and RLS policies are active."
-        : "Connected to Supabase project endpoint. Please run the SQL setup script to initialize missing tables.",
+        : `Connected to Supabase project endpoint, but ${missingTables.length} table(s) are missing (${missingTables.join(", ")}). Please run the SQL setup script to initialize them.`,
     };
   } catch (err: any) {
     const rawMsg = String(err?.message || err || "");
@@ -403,6 +392,7 @@ export async function testSupabaseConnection(): Promise<ConnectionTestResult> {
       projectRef: config.projectRef,
       latencyMs: Date.now() - startTime,
       tablesReady: emptyTables,
+      missingTables: [...MONITORED_DB_TABLES],
       allTablesExist: false,
       message: cleanMsg,
       error: cleanMsg,

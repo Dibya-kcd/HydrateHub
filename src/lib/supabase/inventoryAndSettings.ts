@@ -4,6 +4,7 @@ import {
   proxyFetch,
   sanitizeDate,
 } from "./client";
+import { resilientSupabaseUpsert } from "./pushCache";
 import { productExtraFields } from "../../utils/billExtra";
 import {
   generateSkuId,
@@ -731,19 +732,27 @@ export async function pushBatchToSupabase(
       expiry_date: sanitizeDate(b.expiryDate),
       warehouse_id: b.warehouseId || null,
       quantity: Number(b.quantity || 0),
+      billed_quantity: Number(b.billedQuantity ?? b.quantity ?? 0),
+      free_quantity: Number(b.freeQuantity || 0),
       cost_price: Number(b.costPrice || 0),
+      effective_cost_price: Number(b.effectiveCostPrice ?? b.costPrice ?? 0),
+      landed_cost_per_crate: Number(b.landedCostPerCrate || 0),
       mrp: Number(b.mrp || 0),
+      scheme: b.scheme || "",
       notes: b.notes || "",
+      supplier_invoice_no: b.supplierInvoiceNo || "",
+      supplier_name: b.supplierName || "",
+      inward_date: sanitizeDate(b.inwardDate),
       updated_at: new Date().toISOString(),
     };
-    const { error } = await client
-      .from("inventory_batches")
-      .upsert(payload, { onConflict: "id" });
+    const { error } = await resilientSupabaseUpsert(
+      client,
+      "inventory_batches",
+      payload,
+      { onConflict: "id" },
+    );
     if (error) {
-      delete payload.sku;
-      await client
-        .from("inventory_batches")
-        .upsert(payload, { onConflict: "id" });
+      return { success: false, error: error.message };
     }
     return { success: true };
   } catch (e: any) {
@@ -788,10 +797,13 @@ export async function pushAuditToSupabase(
   if (!client)
     return { success: false, error: "Supabase client is not configured" };
   try {
-    const { error } = await client.from("audits").upsert(
+    const { error } = await resilientSupabaseUpsert(
+      client,
+      "audits",
       {
         id: Number(a.id),
         date: a.date,
+        warehouse_id: a.warehouseId || "",
         entries: a.entries,
         adjusted: Boolean(a.adjusted),
       },
@@ -981,36 +993,23 @@ export async function pushPromotionToSupabase(pr: Promotion): Promise<void> {
       free_reward_choice: pr.freeRewardChoice || "all_eligible",
       free_product_id: pr.freeProductId ? Number(pr.freeProductId) : null,
       free_product_qty: pr.freeProductQty || 1,
+      product_group: cleanGroup,
+      group_category: groupCat,
+      group_brand: groupBr,
+      free_item_rule: fItemRule,
+      customer_choice_product_id: choicePid,
       is_active: pr.isActive !== false,
       config: promoConfig,
     };
 
-    const { error } = await client
-      .from("promotions")
-      .upsert(fullPayload, { onConflict: "id" });
+    const { error } = await resilientSupabaseUpsert(
+      client,
+      "promotions",
+      fullPayload,
+      { onConflict: "id" },
+    );
     if (error) {
-      console.warn(
-        "Failed to upsert to promotions with full schema, trying standard payload without bundle columns:",
-        error.message,
-      );
-      // Fallback: minimal columns + config (originalType preserved)
-      const altPayload = {
-        id: Number(pr.id),
-        name: pr.name,
-        type: safeDbType,
-        buy_qty: pr.buyQty || 0,
-        free_qty: pr.freeQty || 0,
-        percent: pr.percent || 0,
-        flat_per_case: pr.flatPerCase || 0,
-        product_ids: cleanGroup.length > 0 ? cleanGroup : cleanIds,
-        config: promoConfig,
-      };
-      const { error: altErr } = await client
-        .from("promotions")
-        .upsert(altPayload, { onConflict: "id" });
-      if (altErr) {
-        console.warn("Failed to upsert to promotions table:", altErr.message);
-      }
+      console.warn("Failed to upsert to promotions table:", error.message);
     }
 
     // Always mirror to app_collections 'schemes' to guarantee zero data loss & perfect offline/online persistence

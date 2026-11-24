@@ -5,6 +5,7 @@ import {
   changedSinceBase,
   readDeletedRecordIds,
   readTombstones,
+  resilientUpsert,
 } from "../dbHelpers";
 import {
   flushDiskCollectionsNow,
@@ -16,6 +17,7 @@ import {
   withSupabaseTimeout,
 } from "../supabaseStore";
 import { emitSyncEvent } from "../syncEvents";
+import { formatPromotionRowForServer } from "./syncHelpers";
 
 const inferServerPaymentKind = (p: any): string => {
   if (
@@ -236,31 +238,11 @@ export function registerCustomersSchemesPaymentsRoutes(app: Express) {
       ];
       await setCollectionData("schemes", updated);
 
-      const safeType =
-        schemeData.type === "bundle"
-          ? "bogo"
-          : ["bogo", "percent", "flat"].includes(schemeData.type)
-            ? schemeData.type
-            : "bogo";
-      const dbRow = {
-        id,
-        name: schemeData.name,
-        type: safeType,
-        buy_qty: Number(schemeData.buyQty ?? schemeData.buy_qty ?? 0),
-        free_qty: Number(schemeData.freeQty ?? schemeData.free_qty ?? 0),
-        percent: Number(schemeData.percent ?? 0),
-        flat_per_case: Number(
-          schemeData.flatPerCase ?? schemeData.flat_per_case ?? 0,
-        ),
-        product_ids: schemeData.productIds || schemeData.product_ids || [],
-      };
+      const dbRow = formatPromotionRowForServer(fullScheme);
 
       if (isSupabaseAvailable()) {
         try {
-          await withSupabaseTimeout(
-            supabase.from("promotions").upsert(dbRow, { onConflict: "id" }),
-            2500,
-          );
+          await resilientUpsert(supabase, "promotions", dbRow, { onConflict: "id" });
         } catch (pErr: any) {
           console.warn("Note on mirroring to public.promotions:", pErr?.message);
         }
@@ -269,7 +251,21 @@ export function registerCustomersSchemesPaymentsRoutes(app: Express) {
           await withSupabaseTimeout(
             supabase
               .from("promotional_schemes")
-              .upsert(fullScheme, { onConflict: "id" }),
+              .upsert(
+                {
+                  id: String(id),
+                  name: schemeData.name || "",
+                  type: dbRow.type,
+                  buy_qty: dbRow.buy_qty,
+                  free_qty: dbRow.free_qty,
+                  percent: dbRow.percent,
+                  flat_per_case: dbRow.flat_per_case,
+                  product_ids: dbRow.product_ids,
+                  is_active: dbRow.is_active,
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: "id" },
+              ),
             2500,
           );
         } catch {
@@ -295,32 +291,12 @@ export function registerCustomersSchemesPaymentsRoutes(app: Express) {
       await setCollectionData("schemes", list);
 
       if (isSupabaseAvailable() && list.length > 0) {
-        const rows = list.map((schemeData: any) => {
-          const safeType =
-            schemeData.type === "bundle"
-              ? "bogo"
-              : ["bogo", "percent", "flat"].includes(schemeData.type)
-                ? schemeData.type
-                : "bogo";
-          return {
-            id: Number(schemeData.id),
-            name: schemeData.name,
-            type: safeType,
-            buy_qty: Number(schemeData.buyQty ?? schemeData.buy_qty ?? 0),
-            free_qty: Number(schemeData.freeQty ?? schemeData.free_qty ?? 0),
-            percent: Number(schemeData.percent ?? 0),
-            flat_per_case: Number(
-              schemeData.flatPerCase ?? schemeData.flat_per_case ?? 0,
-            ),
-            product_ids: schemeData.productIds || schemeData.product_ids || [],
-          };
-        });
+        const rows = list.map(formatPromotionRowForServer);
 
         try {
-          const { error: pErr } = (await withSupabaseTimeout(
-            supabase.from("promotions").upsert(rows, { onConflict: "id" }),
-            2500,
-          )) as any;
+          const { error: pErr } = await resilientUpsert(supabase, "promotions", rows, {
+            onConflict: "id",
+          });
           if (pErr) {
             console.warn("Mirroring to promotions table noted:", pErr.message);
           }

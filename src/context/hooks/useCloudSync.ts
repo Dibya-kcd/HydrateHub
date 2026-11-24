@@ -249,14 +249,26 @@ export function useCloudSync({
 }: UseCloudSyncParams) {
   const [supabaseConfig, setSupabaseConfigState] =
     useState<SupabaseConfig>(getSupabaseConfig);
-  const [supabaseStatus, setSupabaseStatus] = useState({
+  const [supabaseStatus, setSupabaseStatus] = useState<{
+    isConnected: boolean;
+    isChecking: boolean;
+    latencyMs: number;
+    allTablesExist: boolean;
+    tablesReady?: Record<string, boolean>;
+    missingTables?: string[];
+    lastSyncedAt: string | null;
+    message: string;
+    error?: string;
+  }>({
     isConnected: false,
     isChecking: false,
     latencyMs: 0,
     allTablesExist: false,
-    lastSyncedAt: null as string | null,
+    tablesReady: undefined,
+    missingTables: [],
+    lastSyncedAt: null,
     message: "Testing Supabase database connection...",
-    error: undefined as string | undefined,
+    error: undefined,
   });
 
   const isInitialMountRef = useRef(true);
@@ -266,11 +278,18 @@ export function useCloudSync({
     setSupabaseStatus((prev) => ({ ...prev, isChecking: true }));
     try {
       const result = await testSupabaseConnection();
+      const missingTables = Array.isArray(result.missingTables)
+        ? result.missingTables
+        : Object.entries(result.tablesReady || {})
+            .filter(([, ok]) => !ok)
+            .map(([name]) => name);
       setSupabaseStatus({
         isConnected: result.connected,
         isChecking: false,
         latencyMs: result.latencyMs,
         allTablesExist: result.allTablesExist,
+        tablesReady: result.tablesReady,
+        missingTables,
         lastSyncedAt: null,
         message: result.message,
         error: result.error,
@@ -281,6 +300,8 @@ export function useCloudSync({
         isChecking: false,
         latencyMs: 0,
         allTablesExist: false,
+        tablesReady: undefined,
+        missingTables: [],
         lastSyncedAt: null,
         message: "Could not connect to Supabase endpoint.",
         error: err?.message || String(err),

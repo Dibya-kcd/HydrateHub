@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { todayISO } from "../../src/utils/dateLocal";
-import { formatWarehouseForSupabase } from "../dbHelpers";
+import { formatWarehouseForSupabase, resilientUpsert } from "../dbHelpers";
 import {
   getCollectionData,
   isSupabaseAvailable,
@@ -9,6 +9,7 @@ import {
   withSupabaseTimeout,
 } from "../supabaseStore";
 import { emitSyncEvent } from "../syncEvents";
+import { formatAuditRowForServer, mapDbAuditRowToApp } from "./syncHelpers";
 
 export function registerSettingsWarehousesAuditsRoutes(app: Express) {
   // SETTINGS ROUTES (billing_settings and organization_profile)
@@ -304,7 +305,7 @@ export function registerSettingsWarehousesAuditsRoutes(app: Express) {
           2500,
         )) as any;
         if (!error && Array.isArray(audits) && audits.length > 0) {
-          return res.json({ success: true, data: audits });
+          return res.json({ success: true, data: audits.map(mapDbAuditRowToApp) });
         }
       }
       const col = await getCollectionData("audits");
@@ -322,23 +323,20 @@ export function registerSettingsWarehousesAuditsRoutes(app: Express) {
       const payload = {
         id: Number(a.id || Date.now()),
         date: a.date || todayISO(),
+        ...(a.warehouseId || a.warehouse_id
+          ? { warehouseId: String(a.warehouseId || a.warehouse_id) }
+          : {}),
         time: a.time || null,
         referenceNote: a.referenceNote || null,
         entries: Array.isArray(a.entries) ? a.entries : [],
         adjusted: Boolean(a.adjusted),
       };
       if (isSupabaseAvailable()) {
-        await withSupabaseTimeout(
-          supabase.from("audits").upsert(
-            {
-              id: payload.id,
-              date: payload.date,
-              entries: payload.entries,
-              adjusted: payload.adjusted,
-            },
-            { onConflict: "id" },
-          ),
-          2500,
+        await resilientUpsert(
+          supabase,
+          "audits",
+          formatAuditRowForServer(payload),
+          { onConflict: "id" },
         ).catch(() => {});
       }
       const existing = await getCollectionData("audits");

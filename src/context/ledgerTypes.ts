@@ -764,6 +764,8 @@ export interface LedgerContextType {
     isChecking: boolean;
     latencyMs: number;
     allTablesExist: boolean;
+    tablesReady?: Record<string, boolean>;
+    missingTables?: string[];
     lastSyncedAt: string | null;
     message: string;
     error?: string;

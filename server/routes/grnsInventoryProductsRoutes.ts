@@ -11,6 +11,7 @@ import {
   addTombstone,
   mergeRecordLists,
   readTombstones,
+  resilientUpsert,
 } from "../dbHelpers";
 import {
   getCollectionData,
@@ -20,6 +21,10 @@ import {
   withSupabaseTimeout,
 } from "../supabaseStore";
 import { emitSyncEvent } from "../syncEvents";
+import {
+  formatBatchRowForServer,
+  mapDbBatchRowToApp,
+} from "./syncHelpers";
 
 export function registerGrnsInventoryProductsRoutes(app: Express) {
   // 2D. GRNS (GOODS RECEIVED NOTES / INWARD CONSIGNMENTS)
@@ -190,34 +195,40 @@ export function registerGrnsInventoryProductsRoutes(app: Express) {
         }
 
         if (Array.isArray(g.items) && g.items.length > 0) {
-          const batchRows = g.items.map((it: any) => ({
-            id: `batch_${g.id}_${it.id || it.productId}`,
-            product_id: Number(it.productId),
-            sku: it.sku || "",
-            batch_number: it.batchNumber || `LOT-${g.invoiceNo || Date.now()}`,
-            mfg_date: it.mfgDate || null,
-            expiry_date: it.expiry || null,
-            warehouse_id: g.warehouseId || null,
-            quantity:
-              Number(it.totalReceivedQty || it.qty || 0) +
-              Number(it.supplierSchemeFreeQty || 0),
-            cost_price: Number(it.unitPrice || 0),
-            effective_cost_price: Number(
-              it.effectiveCostPerUnit ||
-                it.landedCostPerUnit ||
-                it.unitPrice ||
-                0,
-            ),
-            mrp: Number(it.retailRate || 0),
-            notes: `GRN: ${g.grnNumber || g.id} · Inv: ${g.invoiceNo || ""}`,
-            updated_at: new Date().toISOString(),
-          }));
-          await withSupabaseTimeout(
-            supabase
-              .from("inventory_batches")
-              .upsert(batchRows, { onConflict: "id" }),
-            2500,
-          ).catch(() => {});
+          const batchRows = g.items.map((it: any) =>
+            formatBatchRowForServer({
+              id: `batch_${g.id}_${it.id || it.productId}`,
+              productId: Number(it.productId),
+              sku: it.sku || "",
+              batchNumber: it.batchNumber || `LOT-${g.invoiceNo || Date.now()}`,
+              mfgDate: it.mfgDate || null,
+              expiryDate: it.expiry || null,
+              warehouseId: g.warehouseId || null,
+              quantity:
+                Number(it.totalReceivedQty || it.qty || 0) +
+                Number(it.supplierSchemeFreeQty || 0),
+              billedQuantity: Number(it.billedQty ?? it.qty ?? it.totalReceivedQty ?? 0),
+              freeQuantity:
+                Number(it.freeQty || 0) + Number(it.supplierSchemeFreeQty || 0),
+              costPrice: Number(it.unitPrice || 0),
+              effectiveCostPrice: Number(
+                it.effectiveCostPerUnit ||
+                  it.landedCostPerUnit ||
+                  it.unitPrice ||
+                  0,
+              ),
+              landedCostPerCrate: Number(it.landedCostPerCrate || it.landedCostPerUnit || 0),
+              mrp: Number(it.retailRate || 0),
+              scheme: it.scheme || "",
+              notes: `GRN: ${g.grnNumber || g.id} · Inv: ${g.invoiceNo || ""}`,
+              supplierInvoiceNo: g.invoiceNo || "",
+              supplierName: g.supplierName || "",
+              inwardDate: g.inwardDate || todayISO(),
+            }),
+          );
+          await resilientUpsert(supabase, "inventory_batches", batchRows, {
+            onConflict: "id",
+          }).catch(() => {});
         }
       }
 
@@ -435,28 +446,10 @@ export function registerGrnsInventoryProductsRoutes(app: Express) {
         }
 
         if (batchList.length > 0) {
-          const batchRows = batchList.map((b: any) => ({
-            id: String(b.id),
-            product_id: Number(b.productId),
-            sku: b.sku || "",
-            batch_number: b.batchNumber || "",
-            mfg_date: b.mfgDate || null,
-            expiry_date: b.expiryDate || null,
-            warehouse_id: b.warehouseId || null,
-            quantity: Number(b.quantity || 0),
-            cost_price: Number(b.costPrice || 0),
-            effective_cost_price: Number(b.effectiveCostPrice || b.costPrice || 0),
-            mrp: Number(b.mrp || 0),
-            scheme: b.scheme || "",
-            notes: b.notes || "",
-            updated_at: new Date().toISOString(),
-          }));
-          await withSupabaseTimeout(
-            supabase
-              .from("inventory_batches")
-              .upsert(batchRows, { onConflict: "id" }),
-            3000,
-          ).catch(() => {});
+          const batchRows = batchList.map(formatBatchRowForServer);
+          await resilientUpsert(supabase, "inventory_batches", batchRows, {
+            onConflict: "id",
+          }).catch(() => {});
         }
 
         const grnRow = {
@@ -1056,22 +1049,7 @@ export function registerGrnsInventoryProductsRoutes(app: Express) {
           )) as any)
         : { data: null, error: null };
       if (!error && Array.isArray(batches) && batches.length > 0) {
-        const formatted = batches.map((r: any) => ({
-          id: String(r.id),
-          productId: Number(r.product_id),
-          sku: r.sku || "",
-          batchNumber: r.batch_number || "",
-          mfgDate: r.mfg_date || "",
-          expiryDate: r.expiry_date || "",
-          warehouseId: r.warehouse_id || "",
-          quantity: Number(r.quantity || 0),
-          costPrice: Number(r.cost_price || 0),
-          mrp: Number(r.mrp || 0),
-          scheme: r.scheme || "",
-          effectiveCostPrice: Number(r.effective_cost_price || 0),
-          notes: r.notes || "",
-        }));
-        return res.json({ success: true, data: formatted });
+        return res.json({ success: true, data: batches.map(mapDbBatchRowToApp) });
       }
 
       const colBatches = await getCollectionData("inventory_batches");
@@ -1099,41 +1077,12 @@ export function registerGrnsInventoryProductsRoutes(app: Express) {
         return res.json({ success: true, count: 0 });
       }
 
-      const payload = batchList.map((b: any) => ({
-        id: String(b.id),
-        product_id: Number(b.productId || b.product_id),
-        sku: String(b.sku || ""),
-        batch_number: String(b.batchNumber || b.batch_number || ""),
-        mfg_date: b.mfgDate || b.mfg_date || null,
-        expiry_date: b.expiryDate || b.expiry_date || null,
-        warehouse_id: String(b.warehouseId || b.warehouse_id || ""),
-        quantity: Number(b.quantity || 0),
-        cost_price: Number(b.costPrice || b.cost_price || 0),
-        mrp: Number(b.mrp || 0),
-        scheme: String(b.scheme || ""),
-        effective_cost_price: Number(
-          b.effectiveCostPrice || b.effective_cost_price || 0,
-        ),
-        notes: String(b.notes || ""),
-        updated_at: new Date().toISOString(),
-      }));
+      const payload = batchList.map(formatBatchRowForServer);
 
       if (isSupabaseAvailable()) {
-        const { error } = (await withSupabaseTimeout(
-          supabase
-            .from("inventory_batches")
-            .upsert(payload, { onConflict: "id" }),
-          2500,
-        )) as any;
-        if (error) {
-          const fallback = payload.map(({ sku: _s, ...rest }: any) => rest);
-          await withSupabaseTimeout(
-            supabase
-              .from("inventory_batches")
-              .upsert(fallback, { onConflict: "id" }),
-            2500,
-          ).catch(() => {});
-        }
+        await resilientUpsert(supabase, "inventory_batches", payload, {
+          onConflict: "id",
+        }).catch(() => {});
       }
 
       if (Array.isArray(batches)) {

@@ -1,10 +1,12 @@
 import React from 'react';
 import {
+  AlertTriangle,
   Building2,
   ChevronLeft,
   ChevronRight,
   Cloud,
   Compass,
+  Copy,
   Database,
   History,
   Palette,
@@ -13,6 +15,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { COMPLETE_SQL_SCHEMA_SCRIPT } from '../../../lib/supabase';
 import { FontSize } from '../../../types';
 import { AVATAR_IDS, AvatarId, writeAvatar } from '../../../utils/avatar';
 import { confirmDialog } from '../../../utils/dialogs';
@@ -229,7 +232,13 @@ export const SettingsDisplayMobile: React.FC<DisplayMobileProps> = ({
 interface CloudMobileProps {
   setMobileSection: React.Dispatch<React.SetStateAction<SettingsSection | null>>;
   supabaseConfig: { projectRef: string };
-  supabaseStatus: { isConnected: boolean; latencyMs: number; lastSyncedAt?: string };
+  supabaseStatus: {
+    isConnected: boolean;
+    latencyMs: number;
+    allTablesExist?: boolean;
+    missingTables?: string[];
+    lastSyncedAt?: string;
+  };
   isPulling: boolean;
   handlePullCloud: () => Promise<void>;
   checkSupabaseConnection: () => Promise<any>;
@@ -250,7 +259,14 @@ export const SettingsCloudMobile: React.FC<CloudMobileProps> = ({
   isSaving,
   toastMessage,
   setToastMessage,
-}) => (
+}) => {
+  const missingTables = supabaseStatus.missingTables || [];
+  const showMissingTables =
+    supabaseStatus.isConnected &&
+    supabaseStatus.allTablesExist === false &&
+    missingTables.length > 0;
+
+  return (
   <div id="view-settings" className="rt-flow-phone">
     <div className="hh-sales-top hh-sales-top--flush hh-inv-top hh-inv-top--flow">
       <div className="hh-sales-top__row">
@@ -279,7 +295,43 @@ export const SettingsCloudMobile: React.FC<CloudMobileProps> = ({
           <span className="text-slate-500">Latency</span>
           <span className="font-bold text-emerald-700 tabular-nums">{supabaseStatus.latencyMs} ms</span>
         </div>
+        {supabaseStatus.isConnected && supabaseStatus.allTablesExist !== undefined && (
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-slate-500">Schema</span>
+            <span className={`font-bold ${showMissingTables ? 'text-amber-700' : 'text-emerald-700'}`}>
+              {showMissingTables ? `${missingTables.length} missing` : 'All tables ready'}
+            </span>
+          </div>
+        )}
       </div>
+
+      {showMissingTables && (
+        <div className="hh-inv-card !bg-amber-50 !border-amber-200 space-y-2 text-xs">
+          <div className="flex items-center gap-1.5 font-extrabold text-amber-900">
+            <AlertTriangle size={14} className="shrink-0" />
+            <span>Missing tables ({missingTables.length})</span>
+          </div>
+          <div className="font-mono text-[11px] text-amber-800 break-all">
+            {missingTables.join(', ')}
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await navigator.clipboard?.writeText(COMPLETE_SQL_SCHEMA_SCRIPT);
+                setToastMessage('SQL setup script copied. Run in Supabase SQL Editor.');
+              } catch {
+                setToastMessage('Copy schema from migrations/supabase-schema.sql.');
+              }
+              setTimeout(() => setToastMessage(null), 4000);
+            }}
+            className="w-full py-2 px-3 rounded-lg bg-amber-900 text-white font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <Copy size={13} />
+            <span>Copy SQL setup script</span>
+          </button>
+        </div>
+      )}
 
       <div className="hh-inv-card flex items-center justify-between gap-3">
         <div className="min-w-0">
@@ -334,7 +386,8 @@ export const SettingsCloudMobile: React.FC<CloudMobileProps> = ({
       </button>
     </div>
   </div>
-);
+  );
+};
 
 interface BackupsMobileProps {
   setMobileSection: React.Dispatch<React.SetStateAction<SettingsSection | null>>;

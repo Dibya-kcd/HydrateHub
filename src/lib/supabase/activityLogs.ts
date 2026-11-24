@@ -114,11 +114,11 @@ export async function pushActivityLogsBatchToSupabase(entries: ActivityLogEntry[
   try {
     const { data: existingRow } = await client
       .from("app_collections")
-      .select("items")
-      .eq("name", "activity_logs")
+      .select("data")
+      .eq("key", "activity_logs")
       .maybeSingle();
-    const existingList: ActivityLogEntry[] = Array.isArray(existingRow?.items)
-      ? existingRow.items.map(dbRowToActivityLog)
+    const existingList: ActivityLogEntry[] = Array.isArray(existingRow?.data)
+      ? existingRow.data.map(dbRowToActivityLog)
       : [];
     const byId = new Map<string, ActivityLogEntry>();
     for (const item of existingList) byId.set(item.id, item);
@@ -128,11 +128,11 @@ export async function pushActivityLogsBatchToSupabase(entries: ActivityLogEntry[
       .slice(0, 300);
     const { error } = await client.from("app_collections").upsert(
       {
-        name: "activity_logs",
-        items: merged,
+        key: "activity_logs",
+        data: merged,
         updated_at: new Date().toISOString(),
       },
-      { onConflict: "name" },
+      { onConflict: "key" },
     );
     if (!error) fallbackOk = true;
   } catch {
@@ -175,11 +175,11 @@ export async function pullActivityLogsFromSupabase(limit = 1000): Promise<Activi
   try {
     const { data } = await client
       .from("app_collections")
-      .select("items")
-      .eq("name", "activity_logs")
+      .select("data")
+      .eq("key", "activity_logs")
       .maybeSingle();
-    if (Array.isArray(data?.items)) {
-      for (const item of data.items) {
+    if (Array.isArray(data?.data)) {
+      for (const item of data.data) {
         const entry = dbRowToActivityLog(item);
         if (!byId.has(entry.id)) {
           byId.set(entry.id, entry);

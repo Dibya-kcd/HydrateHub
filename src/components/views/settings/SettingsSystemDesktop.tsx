@@ -1,5 +1,6 @@
 import React from 'react';
-import { Cloud, Database, Download, Eye, Upload } from 'lucide-react';
+import { AlertTriangle, Cloud, Copy, Database, Download, Eye, Upload } from 'lucide-react';
+import { COMPLETE_SQL_SCHEMA_SCRIPT } from '../../../lib/supabase';
 import { FontSize } from '../../../types';
 import { AVATAR_IDS, AvatarId, writeAvatar } from '../../../utils/avatar';
 import { confirmDialog } from '../../../utils/dialogs';
@@ -132,7 +133,12 @@ export const SettingsDisplayDesktop: React.FC<DisplayDesktopProps> = ({
 
 interface CloudDesktopProps {
   supabaseConfig: { projectRef: string };
-  supabaseStatus: { isConnected: boolean; latencyMs: number };
+  supabaseStatus: {
+    isConnected: boolean;
+    latencyMs: number;
+    allTablesExist?: boolean;
+    missingTables?: string[];
+  };
   syncToCloud: (opts?: { full?: boolean }) => Promise<{ message: string }>;
   checkSupabaseConnection: () => Promise<any>;
   setToastMessage: React.Dispatch<React.SetStateAction<string | null>>;
@@ -144,46 +150,95 @@ export const SettingsCloudDesktop: React.FC<CloudDesktopProps> = ({
   syncToCloud,
   checkSupabaseConnection,
   setToastMessage,
-}) => (
-  <div
-    data-card-tone={supabaseStatus.isConnected ? 'received' : 'warning'}
-    className="rounded-2xl border p-3.5 sm:p-6 shadow-xs space-y-4"
-  >
-    <div className="flex items-center justify-between gap-2 pb-3 border-b border-black/5">
-      <div className="flex items-center gap-2.5 min-w-0">
-        <span className={`hh-icon-badge hh-icon-badge--sm shrink-0 ${supabaseStatus.isConnected ? 'hh-icon-badge--green' : 'hh-icon-badge--amber'}`}>
-          <Cloud className="w-4 h-4" />
-        </span>
-        <div className="min-w-0">
-          <h2 className="text-base sm:text-lg font-extrabold text-neutral-900 truncate">Database &amp; Cloud Sync</h2>
-          <p className="hidden sm:block text-xs text-neutral-600 mt-0.5">
-            Real-time PostgreSQL replication, offline resilience, and ledger state.
-          </p>
-        </div>
-      </div>
-      <span
-        className={`px-2.5 py-1 rounded-full text-xs font-bold shrink-0 ${
-          supabaseStatus.isConnected ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
-        }`}
-      >
-        {supabaseStatus.isConnected ? 'Cloud Connected' : 'Offline Mode'}
-      </span>
-    </div>
+}) => {
+  const missingTables = supabaseStatus.missingTables || [];
+  const showMissingTables =
+    supabaseStatus.isConnected &&
+    supabaseStatus.allTablesExist === false &&
+    missingTables.length > 0;
 
-    <div className="p-3.5 bg-white/85 rounded-xl border border-black/5 text-xs space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="text-neutral-500">PostgreSQL Engine:</span>
-        <span className="font-mono font-semibold text-neutral-800">Supabase Managed Database</span>
+  return (
+    <div
+      data-card-tone={
+        !supabaseStatus.isConnected
+          ? 'warning'
+          : showMissingTables
+            ? 'warning'
+            : 'received'
+      }
+      className="rounded-2xl border p-3.5 sm:p-6 shadow-xs space-y-4"
+    >
+      <div className="flex items-center justify-between gap-2 pb-3 border-b border-black/5">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span className={`hh-icon-badge hh-icon-badge--sm shrink-0 ${supabaseStatus.isConnected ? 'hh-icon-badge--green' : 'hh-icon-badge--amber'}`}>
+            <Cloud className="w-4 h-4" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-base sm:text-lg font-extrabold text-neutral-900 truncate">Database &amp; Cloud Sync</h2>
+            <p className="hidden sm:block text-xs text-neutral-600 mt-0.5">
+              Real-time PostgreSQL replication, offline resilience, and ledger state.
+            </p>
+          </div>
+        </div>
+        <span
+          className={`px-2.5 py-1 rounded-full text-xs font-bold shrink-0 ${
+            supabaseStatus.isConnected ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
+          }`}
+        >
+          {supabaseStatus.isConnected ? 'Cloud Connected' : 'Offline Mode'}
+        </span>
       </div>
-      <div className="flex items-center justify-between">
-        <span className="text-neutral-500">Project Reference:</span>
-        <span className="font-mono font-semibold text-neutral-800">{supabaseConfig.projectRef}</span>
+
+      <div className="p-3.5 bg-white/85 rounded-xl border border-black/5 text-xs space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-neutral-500">PostgreSQL Engine:</span>
+          <span className="font-mono font-semibold text-neutral-800">Supabase Managed Database</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-neutral-500">Project Reference:</span>
+          <span className="font-mono font-semibold text-neutral-800">{supabaseConfig.projectRef}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-neutral-500">Latency:</span>
+          <span className="font-mono font-semibold text-neutral-800">{supabaseStatus.latencyMs}ms</span>
+        </div>
+        {supabaseStatus.isConnected && supabaseStatus.allTablesExist !== undefined && (
+          <div className="flex items-center justify-between">
+            <span className="text-neutral-500">Schema Status:</span>
+            <span className={`font-semibold ${showMissingTables ? 'text-amber-700' : 'text-emerald-700'}`}>
+              {showMissingTables ? `${missingTables.length} table(s) missing` : 'All tables active'}
+            </span>
+          </div>
+        )}
       </div>
-      <div className="flex items-center justify-between">
-        <span className="text-neutral-500">Latency:</span>
-        <span className="font-mono font-semibold text-neutral-800">{supabaseStatus.latencyMs}ms</span>
-      </div>
-    </div>
+
+      {showMissingTables && (
+        <div className="p-3.5 bg-amber-50/90 border border-amber-200 rounded-xl text-xs space-y-2">
+          <div className="flex items-center gap-1.5 font-bold text-amber-900">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>Missing database tables ({missingTables.length})</span>
+          </div>
+          <p className="text-amber-800 leading-relaxed font-mono text-[11px] break-all">
+            {missingTables.join(', ')}
+          </p>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await navigator.clipboard?.writeText(COMPLETE_SQL_SCHEMA_SCRIPT);
+                setToastMessage('SQL setup script copied. Paste and run in Supabase SQL Editor.');
+              } catch {
+                setToastMessage('Copy COMPLETE_SQL_SCHEMA_SCRIPT from migrations/supabase-schema.sql.');
+              }
+              setTimeout(() => setToastMessage(null), 4000);
+            }}
+            className="px-3 py-1.5 bg-amber-900 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer hover:bg-amber-800"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            <span>Copy SQL Setup Script</span>
+          </button>
+        </div>
+      )}
 
     <div className="flex flex-wrap gap-2.5 pt-1">
       <button
@@ -235,7 +290,8 @@ export const SettingsCloudDesktop: React.FC<CloudDesktopProps> = ({
       </button>
     </div>
   </div>
-);
+  );
+};
 
 interface BackupsDesktopProps {
   currentUserRole?: string;

@@ -748,6 +748,7 @@ export interface AuditEntry {
 export interface Audit {
   id: number;
   date: string;
+  warehouseId?: string;
   time?: string;
   referenceNote?: string;
   entries: AuditEntry[];

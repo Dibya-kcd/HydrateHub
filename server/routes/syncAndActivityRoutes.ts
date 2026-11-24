@@ -19,7 +19,7 @@ import {
   volumeFromName,
 } from "../../src/utils/billing";
 import { CATS, INIT_WAREHOUSES } from "../../src/constants/initialData";
-import { todayISO, toLocalISODate } from "../../src/utils/dateLocal";
+import { todayISO } from "../../src/utils/dateLocal";
 import { fingerprintOf, shortHash } from "../../src/utils/syncGate";
 import { formatSalesmanResponse, formatSalesmanStored } from "../authMiddleware";
 import {
@@ -39,256 +39,33 @@ import {
   syncNormalizedRows,
   withSupabaseTimeout,
 } from "../supabaseStore";
+import { MONITORED_DB_TABLES } from "../../src/lib/supabase/client";
 import { addSyncClient, emitSyncEvent } from "../syncEvents";
+import {
+  fetchAllTableRows,
+  formatAuditRowForServer,
+  formatBatchRowForServer,
+  formatPromotionRowForServer,
+  mapAppActivityToDb,
+  mapAppPaymentToDb,
+  mapDbActivityToApp,
+  mapDbAuditRowToApp,
+  mapDbBatchRowToApp,
+  mapDbPaymentToApp,
+  mapPromotionCollectionItem,
+  normalizePhoneDigits,
+  ownedBySalesman,
+  sanitizeDate,
+  syncExtendedCollectionsToSupabase,
+} from "./syncHelpers";
 
-const HEALTH_TABLES = [
-  "warehouses",
-  "products",
-  "inventory_batches",
-  "stock_transfers",
-  "promotions",
-  "bills",
-  "trips",
-  "audits",
-  "organization_profile",
-  "billing_settings",
-  "inventory_items",
-  "app_collections",
-  "salesmen",
-] as const;
+const HEALTH_TABLES = MONITORED_DB_TABLES;
 
 const TOMBSTONE_KEYS = [
   "deleted_bill_ids",
   "deleted_grn_ids",
   "deleted_trip_ids",
 ];
-
-function sanitizeDate(val?: string): string | null {
-  if (!val) return null;
-  const trimmed = String(val).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
-  const parsed = new Date(trimmed);
-  if (!isNaN(parsed.getTime())) {
-    return toLocalISODate(parsed);
-  }
-  return null;
-}
-
-function ownedBySalesman(r: any, sid: string): boolean {
-  const cleanSid = String(sid || "").trim();
-  if (!cleanSid || !r || typeof r !== "object") return false;
-  return (
-    String(r.salesmanId || "").trim() === cleanSid ||
-    String(r.salesman_id || "").trim() === cleanSid
-  );
-}
-
-function normalizePhoneDigits(p: any): string {
-  return String(p || "").replace(/\D/g, "").slice(-10);
-}
-
-function mapDbPaymentToApp(r: any) {
-  const createdAt = r.created_at || r.createdAt || new Date().toISOString();
-  const entryKind = r.entry_kind || r.entryKind;
-  return {
-    id: String(r.id),
-    ...(r.bill_id !== null && r.bill_id !== undefined
-      ? { billId: Number(r.bill_id) }
-      : {}),
-    ...(r.customer_id ? { customerId: String(r.customer_id) } : {}),
-    customerName: r.customer_name || r.customerName || "",
-    customerPhone: r.customer_phone || r.customerPhone || "",
-    ...(r.salesman_id ? { salesmanId: String(r.salesman_id) } : {}),
-    paymentDate: r.payment_date || r.paymentDate || sanitizeDate(createdAt) || todayISO(),
-    amount: Number(r.amount) || 0,
-    mode: r.mode || "cash",
-    ...(entryKind ? { entryKind } : {}),
-    referenceNote: r.reference_note ?? r.referenceNote ?? "",
-    recordedBy: r.recorded_by ?? r.recordedBy ?? "",
-    isAdvance: Boolean(r.is_advance ?? r.isAdvance),
-    ...(Boolean(r.is_advance_applied ?? r.isAdvanceApplied)
-      ? { isAdvanceApplied: true }
-      : {}),
-    ...(Number(r.applied_amount ?? r.appliedAmount) > 0
-      ? { appliedAmount: Number(r.applied_amount ?? r.appliedAmount) }
-      : {}),
-    ...(r.source_payment_id || r.sourcePaymentId
-      ? { sourcePaymentId: String(r.source_payment_id || r.sourcePaymentId) }
-      : {}),
-    ...(r.source_bill_id !== null && r.source_bill_id !== undefined
-      ? { sourceBillId: Number(r.source_bill_id) }
-      : r.sourceBillId !== undefined
-        ? { sourceBillId: Number(r.sourceBillId) }
-        : {}),
-    ...(Boolean(r.is_refund ?? r.isRefund) ? { isRefund: true } : {}),
-    ...(r.reversal_of || r.reversalOf
-      ? { reversalOf: String(r.reversal_of || r.reversalOf) }
-      : {}),
-    createdAt,
-    ...(r.updated_at || r.updatedAt
-      ? { updatedAt: r.updated_at || r.updatedAt }
-      : {}),
-  };
-}
-
-function mapAppPaymentToDb(p: any) {
-  const createdAt = p?.createdAt || new Date().toISOString();
-  return {
-    id: String(p.id),
-    bill_id: p.billId ? Number(p.billId) : null,
-    customer_id: p.customerId || null,
-    customer_name: p.customerName || "",
-    customer_phone: p.customerPhone || "",
-    salesman_id: p.salesmanId || null,
-    payment_date: p.paymentDate || sanitizeDate(createdAt) || todayISO(),
-    amount: Number(p.amount) || 0,
-    mode: p.mode || "cash",
-    entry_kind:
-      p.entryKind ||
-      (p.isRefund || (Number(p.amount) || 0) < 0
-        ? "refund"
-        : p.billId && String(p.referenceNote || "").startsWith("Advance / credit adjusted")
-          ? "advance_adjustment"
-          : p.isAdvance || (!p.billId && String(p.referenceNote || "").includes("Advance / on account"))
-            ? "advance"
-            : "receipt"),
-    is_advance: Boolean(p.isAdvance),
-    is_refund: Boolean(p.isRefund),
-    is_advance_applied: Boolean(p.isAdvanceApplied),
-    applied_amount: Number(p.appliedAmount) || 0,
-    source_payment_id: p.sourcePaymentId || null,
-    source_bill_id: p.sourceBillId ? Number(p.sourceBillId) : null,
-    ...(p.reversalOf ? { reversal_of: String(p.reversalOf) } : {}),
-    reference_note: p.referenceNote || "",
-    recorded_by: p.recordedBy || "",
-    deleted_at: null,
-    created_at: createdAt,
-    updated_at: p.updatedAt || createdAt,
-  };
-}
-
-function mapDbActivityToApp(r: any) {
-  const rawRole = String(r.actor_role || r.actorRole || "admin");
-  const actorRole =
-    rawRole === "salesman" || rawRole === "system" ? rawRole : "admin";
-  return {
-    id: String(r.id),
-    at: String(r.created_at || r.at || new Date().toISOString()),
-    entityType: r.entity_type || r.entityType || "settings",
-    entityId: String(r.entity_id ?? r.entityId ?? ""),
-    entityLabel: String(r.entity_label ?? r.entityLabel ?? ""),
-    action: r.action || "edit",
-    actorName: String(r.actor_name || r.actorName || "Admin"),
-    actorRole,
-    ...(r.actor_phone || r.actorPhone
-      ? { actorPhone: String(r.actor_phone || r.actorPhone) }
-      : {}),
-    sourceScreen: String(r.source_screen || r.sourceScreen || ""),
-    ...(r.reason ? { reason: String(r.reason) } : {}),
-    summary: String(r.summary || ""),
-    ...(r.before_data !== undefined || r.before !== undefined
-      ? { before: r.before_data ?? r.before }
-      : {}),
-    ...(r.after_data !== undefined || r.after !== undefined
-      ? { after: r.after_data ?? r.after }
-      : {}),
-    ...(Array.isArray(r.changes) && r.changes.length > 0
-      ? { changes: r.changes }
-      : {}),
-    syncStatus: "synced",
-  };
-}
-
-function mapAppActivityToDb(e: any) {
-  return {
-    id: String(e.id),
-    entity_type: String(e.entityType || "settings"),
-    entity_id: String(e.entityId ?? ""),
-    entity_label: e.entityLabel || "",
-    action: String(e.action || "edit"),
-    actor_name: e.actorName || "Admin",
-    actor_role: e.actorRole || "admin",
-    actor_phone: e.actorPhone || "",
-    source_screen: e.sourceScreen || "",
-    reason: e.reason || "",
-    summary: e.summary || "",
-    before_data: e.before ?? null,
-    after_data: e.after ?? null,
-    changes: Array.isArray(e.changes) ? e.changes : [],
-    created_at: e.at || new Date().toISOString(),
-  };
-}
-
-function mapPromotionCollectionItem(p: any) {
-  const cfg = p?.config && typeof p.config === "object" ? p.config : {};
-  const restoredType =
-    p.type && !["bogo", "percent", "flat"].includes(p.type)
-      ? p.type
-      : cfg.originalType || p.type || "bogo";
-  const groupFromCfg = Array.isArray(cfg.productGroup)
-    ? cfg.productGroup.map(Number).filter((n: number) => !isNaN(n))
-    : [];
-  const rawIds =
-    p.productGroup ??
-    p.product_group ??
-    p.productIds ??
-    p.product_ids ??
-    groupFromCfg;
-  const cleanIds = Array.isArray(rawIds)
-    ? rawIds.map(Number).filter((n: number) => !isNaN(n))
-    : [];
-  return {
-    ...p,
-    id: Number(p.id),
-    type: restoredType,
-    productIds:
-      cleanIds.length > 0
-        ? cleanIds
-        : Array.isArray(p.productIds)
-          ? p.productIds.map(Number).filter((n: number) => !isNaN(n))
-          : [],
-    productGroup:
-      Array.isArray(p.productGroup) && p.productGroup.length > 0
-        ? p.productGroup.map(Number).filter((n: number) => !isNaN(n))
-        : groupFromCfg.length > 0
-          ? groupFromCfg
-          : cleanIds,
-    groupCategory: p.groupCategory ?? cfg.groupCategory ?? undefined,
-    groupBrand: p.groupBrand ?? cfg.groupBrand ?? undefined,
-    freeItemRule:
-      p.freeItemRule ?? p.freeItem ?? cfg.freeItemRule ?? cfg.freeItem ?? "CHEAPEST_IN_GROUP",
-    freeItem:
-      p.freeItemRule ?? p.freeItem ?? cfg.freeItemRule ?? cfg.freeItem ?? "CHEAPEST_IN_GROUP",
-    customerChoiceProductId: p.customerChoiceProductId
-      ? Number(p.customerChoiceProductId)
-      : cfg.customerChoiceProductId
-        ? Number(cfg.customerChoiceProductId)
-        : undefined,
-    isActive: p.isActive !== false,
-  };
-}
-
-async function fetchAllTableRows(table: string, orderCol: string, ascending = true): Promise<{ data: any[] | null; error: any }> {
-  if (!isSupabaseAvailable()) return { data: null, error: null };
-  const rows: any[] = [];
-  const PAGE = 1000;
-  for (let from = 0; from < 50000; from += PAGE) {
-    const res: any = await withSupabaseTimeout(
-      supabase
-        .from(table)
-        .select("*")
-        .order(orderCol, { ascending })
-        .range(from, from + PAGE - 1),
-      3500,
-    );
-    if (res?.skipped) return { data: null, error: { message: "skipped" } };
-    if (res?.error) return { data: null, error: res.error };
-    const page = Array.isArray(res?.data) ? res.data : [];
-    rows.push(...page);
-    if (page.length < PAGE) break;
-  }
-  return { data: rows, error: null };
-}
 
 export function registerSyncAndActivityRoutes(
   app: Express,
@@ -311,6 +88,7 @@ export function registerSyncAndActivityRoutes(
         projectRef: "server-proxy",
         latencyMs: Date.now() - started,
         tablesReady: emptyTables,
+        missingTables: [...HEALTH_TABLES],
         allTablesExist: false,
         message: "Local-first storage is active. Cloud database is not configured or temporarily unavailable.",
       });
@@ -320,16 +98,19 @@ export function registerSyncAndActivityRoutes(
       const checks = await Promise.all(
         HEALTH_TABLES.map(async (tableName) => {
           try {
+            const probeColumn = tableName === "app_collections" ? "key" : "id";
             const { error, skipped }: any = await withSupabaseTimeout(
-              supabase.from(tableName).select("id").limit(1),
-              2000,
+              supabase.from(tableName).select(probeColumn).limit(1),
+              2500,
             );
             if (skipped) return false;
             if (error) {
               const msg = String(error.message || "");
               if (
                 error.code === "PGRST205" ||
+                error.code === "42P01" ||
                 msg.includes("Could not find the table") ||
+                msg.includes("does not exist") ||
                 msg.includes("520") ||
                 msg.includes("timeout") ||
                 msg.includes("<!DOCTYPE")
@@ -347,17 +128,19 @@ export function registerSyncAndActivityRoutes(
       HEALTH_TABLES.forEach((name, idx) => {
         tablesReady[name] = checks[idx];
       });
-      const allTablesExist = Object.values(tablesReady).every(Boolean);
+      const missingTables = HEALTH_TABLES.filter((name) => !tablesReady[name]);
+      const allTablesExist = missingTables.length === 0;
       return res.json({
         connected: true,
         url: "",
         projectRef: "server-proxy",
         latencyMs: Date.now() - started,
         tablesReady,
+        missingTables,
         allTablesExist,
         message: allTablesExist
           ? "Connected via secure server proxy. All database tables are ready."
-          : "Connected via server proxy. Some optional database tables are not yet initialized.",
+          : `Connected via server proxy, but ${missingTables.length} table(s) are missing (${missingTables.join(", ")}). Please run the SQL setup script to initialize them.`,
       });
     } catch (err: any) {
       return res.json({
@@ -366,6 +149,7 @@ export function registerSyncAndActivityRoutes(
         projectRef: "server-proxy",
         latencyMs: Date.now() - started,
         tablesReady: emptyTables,
+        missingTables: [...HEALTH_TABLES],
         allTablesExist: false,
         message: err?.message || "Failed to probe Supabase database.",
         error: err?.message || "Database probe error",
@@ -621,26 +405,7 @@ export function registerSyncAndActivityRoutes(
         }
 
         if (!batchRes.error && Array.isArray(batchRes.data) && batchRes.data.length > 0) {
-          result.inventoryBatches = batchRes.data.map((r: any) => ({
-            id: String(r.id),
-            productId: Number(r.product_id),
-            sku: r.sku || "",
-            batchNumber: r.batch_number,
-            mfgDate: r.mfg_date || "",
-            expiryDate: r.expiry_date || "",
-            warehouseId: r.warehouse_id || "",
-            quantity: Number(r.quantity || 0),
-            billedQuantity: Number(r.billed_quantity || r.quantity || 0),
-            freeQuantity: Number(r.free_quantity || 0),
-            costPrice: Number(r.cost_price || 0),
-            effectiveCostPrice: Number(r.effective_cost_price || r.cost_price || 0),
-            landedCostPerCrate: Number(r.landed_cost_per_crate || 0),
-            mrp: Number(r.mrp || 0),
-            notes: r.notes || "",
-            supplierInvoiceNo: r.supplier_invoice_no || "",
-            supplierName: r.supplier_name || "",
-            inwardDate: r.inward_date || "",
-          }));
+          result.inventoryBatches = batchRes.data.map(mapDbBatchRowToApp);
         }
 
         if (!prodRes.error && Array.isArray(prodRes.data) && prodRes.data.length > 0) {
@@ -852,12 +617,7 @@ export function registerSyncAndActivityRoutes(
         }
 
         if (!isSalesman && !(auditRes as any)?.error && Array.isArray((auditRes as any)?.data) && (auditRes as any).data.length > 0) {
-          result.audits = (auditRes as any).data.map((r: any) => ({
-            id: Number(r.id),
-            date: r.date,
-            entries: Array.isArray(r.entries) ? r.entries : [],
-            adjusted: Boolean(r.adjusted),
-          }));
+          result.audits = (auditRes as any).data.map(mapDbAuditRowToApp);
         }
 
         if (!(orgRes as any)?.error && (orgRes as any)?.data?.data) {
@@ -962,6 +722,11 @@ export function registerSyncAndActivityRoutes(
             approvedBy: r.approved_by || undefined,
             eventDate: r.event_date,
             stockApplied: r.stock_applied !== false,
+            approvalStatus: r.approval_status || "not_required",
+            claimScheme: r.claim_scheme || undefined,
+            compensationPayments: Array.isArray(r.compensation_payments)
+              ? r.compensation_payments
+              : [],
             returnTracking: r.return_tracking || undefined,
             createdAt: r.created_at,
             updatedAt: r.updated_at,
@@ -1201,20 +966,7 @@ export function registerSyncAndActivityRoutes(
         }
 
         if (inventoryBatches.length > 0) {
-          const batchRows = inventoryBatches.map((b: any) => ({
-            id: b.id,
-            product_id: b.productId,
-            sku: b.sku || "",
-            batch_number: b.batchNumber,
-            mfg_date: sanitizeDate(b.mfgDate),
-            expiry_date: sanitizeDate(b.expiryDate),
-            warehouse_id: b.warehouseId || null,
-            quantity: b.quantity || 0,
-            cost_price: b.costPrice || 0,
-            mrp: b.mrp || 0,
-            notes: b.notes || "",
-            updated_at: new Date().toISOString(),
-          }));
+          const batchRows = inventoryBatches.map(formatBatchRowForServer);
           await resilientUpsert(supabase, "inventory_batches", batchRows, { onConflict: "id" });
         }
 
@@ -1261,33 +1013,7 @@ export function registerSyncAndActivityRoutes(
         }
 
         if (promotions.length > 0) {
-          const ALLOWED = new Set(["bogo", "percent", "flat"]);
-          const promoRows = promotions.map((pr: any) => {
-            const cleanIds = (Array.isArray(pr.productIds) ? pr.productIds : pr.product_ids || [])
-              .map(Number)
-              .filter((n: number) => !isNaN(n));
-            const cleanGroup = (
-              Array.isArray(pr.productGroup) && pr.productGroup.length > 0 ? pr.productGroup : cleanIds
-            )
-              .map(Number)
-              .filter((n: number) => !isNaN(n));
-            const safeDbType = ALLOWED.has(String(pr.type)) ? String(pr.type) : "bogo";
-            return {
-              id: Number(pr.id),
-              name: pr.name,
-              type: safeDbType,
-              buy_qty: pr.buyQty || 0,
-              free_qty: pr.freeQty || 0,
-              percent: pr.percent || 0,
-              flat_per_case: pr.flatPerCase || 0,
-              product_ids: cleanGroup.length > 0 ? cleanGroup : cleanIds,
-              config: {
-                ...(pr.config || {}),
-                productGroup: cleanGroup,
-                originalType: pr.type,
-              },
-            };
-          });
+          const promoRows = promotions.map(formatPromotionRowForServer);
           await resilientUpsert(supabase, "promotions", promoRows, { onConflict: "id" });
         }
 
@@ -1315,12 +1041,7 @@ export function registerSyncAndActivityRoutes(
           await resilientUpsert(
             supabase,
             "audits",
-            audits.map((a: any) => ({
-              id: a.id,
-              date: a.date,
-              entries: a.entries,
-              adjusted: Boolean(a.adjusted),
-            })),
+            audits.map(formatAuditRowForServer),
             { onConflict: "id" },
           );
         }
@@ -1346,6 +1067,7 @@ export function registerSyncAndActivityRoutes(
         if (payments && payments.length > 0) {
           await syncNormalizedRows("payments", payments.filter((p: any) => p?.id).map(mapAppPaymentToDb));
         }
+        await syncExtendedCollectionsToSupabase(raw);
       }
 
       emitSyncEvent({ topic: "bills" });
