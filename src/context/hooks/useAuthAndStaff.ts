@@ -379,12 +379,25 @@ export function useAuthAndStaff({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.id, currentUser?.role]);
 
-  // Sign out after a period with no activity (a phone left unlocked, a shop PC left open).
-  // Minutes come from VITE_IDLE_LOGOUT_MINUTES (default 30, 0 turns it off).
+  // Optional sign-out after a period with no activity (a shop PC left open in a browser tab).
+  // INSTALLED apps (home-screen PWA on Android/iOS, Capacitor app) stay signed in: the session slides forward while
+  // the app is used, like WhatsApp or Gmail. Minutes come from VITE_IDLE_LOGOUT_MINUTES when set (0 = never);
+  // when not set: 0 for installed apps, 30 for a normal browser tab.
   useEffect(() => {
     if (!currentUser || typeof window === "undefined") return;
-    const raw = Number((import.meta as any).env?.VITE_IDLE_LOGOUT_MINUTES);
-    const minutes = Number.isFinite(raw) && (import.meta as any).env?.VITE_IDLE_LOGOUT_MINUTES !== undefined ? raw : 30;
+    const isInstalledApp = (): boolean => {
+      try {
+        if ((window as any).Capacitor?.isNativePlatform?.()) return true;
+        if (window.matchMedia?.("(display-mode: standalone)")?.matches) return true;
+        if ((window.navigator as any)?.standalone === true) return true;
+      } catch {
+        /* treat as a browser tab */
+      }
+      return false;
+    };
+    const envRaw = (import.meta as any).env?.VITE_IDLE_LOGOUT_MINUTES;
+    const envMinutes = envRaw === undefined || String(envRaw).trim() === "" ? NaN : Number(envRaw);
+    const minutes = Number.isFinite(envMinutes) ? envMinutes : isInstalledApp() ? 0 : 30;
     if (minutes <= 0) return;
     let last = Date.now();
     const bump = () => {

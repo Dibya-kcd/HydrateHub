@@ -11,12 +11,18 @@ const TOKEN_KEY = "mrwater_api_session_v1";
 interface StoredToken {
   token: string;
   expiresAt: number;
+  /** When the app should quietly swap this token for a fresh one (server-provided, half of the token's life). */
+  refreshAt?: number;
 }
 
-export function setApiSession(token: string | null, expiresAt?: number) {
+export function setApiSession(token: string | null, expiresAt?: number, refreshAt?: number) {
   try {
     if (!token) localStorage.removeItem(TOKEN_KEY);
-    else localStorage.setItem(TOKEN_KEY, JSON.stringify({ token, expiresAt: expiresAt || Date.now() + 12 * 3600e3 }));
+    else {
+      const rec: StoredToken = { token, expiresAt: expiresAt || Date.now() + 30 * 24 * 3600e3 };
+      if (refreshAt && refreshAt > 0) rec.refreshAt = refreshAt;
+      localStorage.setItem(TOKEN_KEY, JSON.stringify(rec));
+    }
   } catch {
     /* storage unavailable */
   }
@@ -41,6 +47,52 @@ export function hasApiAuthSession(): boolean {
   return Boolean(readApiSession()?.token);
 }
 
+let ownRefreshInFlight: Promise<boolean> | null = null;
+let lastOwnRefreshAttemptAt = 0;
+
+/**
+ * Sliding session: swaps the server-issued token for a fresh one so a person who keeps using the app (or opens it
+ * again within the token's life) is never signed out. Network trouble keeps the current token, so offline work
+ * continues; a revoked or capped session is left to the normal 401 handling.
+ * With force=false it only acts once the token is past its refresh point.
+ */
+export async function refreshOwnSessionIfNeeded(force = false): Promise<boolean> {
+  const own = readApiSession();
+  if (!own?.token) return false;
+  const now = Date.now();
+  const due = force || (own.refreshAt ? own.refreshAt <= now : own.expiresAt - now < 6 * 3600e3);
+  if (!due) return false;
+  if (ownRefreshInFlight) return ownRefreshInFlight;
+  if (!force && now - lastOwnRefreshAttemptAt < 60_000) return false;
+  lastOwnRefreshAttemptAt = now;
+  ownRefreshInFlight = (async () => {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 20_000) : null;
+    try {
+      const res = await fetch("/api/auth/refresh", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${own.token}` },
+        signal: controller?.signal,
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => null);
+      if (!data?.token) return false;
+      // Another tab may have refreshed or signed out meanwhile: only replace the token we actually sent.
+      const cur = readApiSession();
+      if (cur && cur.token !== own.token) return false;
+      if (!cur) return false;
+      setApiSession(data.token, data.expiresAt, data.refreshAt);
+      return true;
+    } catch {
+      return false; // offline / server asleep: keep the current token
+    } finally {
+      if (timer) clearTimeout(timer);
+      ownRefreshInFlight = null;
+    }
+  })();
+  return ownRefreshInFlight;
+}
+
 let refreshInFlight: Promise<string | null> | null = null;
 let lastExpiredDispatchAt = 0;
 
@@ -54,7 +106,10 @@ function dispatchAuthExpiredOnce() {
 
 async function currentToken(): Promise<string | null> {
   const own = readApiSession();
-  if (own) return own.token;
+  if (own) {
+    if (own.refreshAt && own.refreshAt <= Date.now()) void refreshOwnSessionIfNeeded();
+    return own.token;
+  }
   if (isServerProxyMode()) return null;
   try {
     const client = getSupabaseClient();
@@ -111,7 +166,11 @@ async function recoverFreshToken(failedToken: string | null): Promise<string | n
 }
 
 export async function refreshSupabaseSessionIfNeeded(): Promise<void> {
-  if (readApiSession() || isServerProxyMode()) return;
+  if (readApiSession()) {
+    await refreshOwnSessionIfNeeded();
+    return;
+  }
+  if (isServerProxyMode()) return;
   try {
     const client = getSupabaseClient();
     if (!client) return;
@@ -251,7 +310,7 @@ export async function serverSignIn(
     if (res.status === 501 || res.status === 404) return null; // not configured on this server
     const data = await res.json().catch(() => ({}));
     if (res.ok && data?.token) {
-      setApiSession(data.token, data.expiresAt);
+      setApiSession(data.token, data.expiresAt, data.refreshAt);
       return { ok: true, salesman: data.salesman };
     }
     return { ok: false, error: data?.error || "Sign-in failed." };

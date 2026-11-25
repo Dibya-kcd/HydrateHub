@@ -1,7 +1,7 @@
 # Closing the open database and API - staged runbook
 
 What exists now (server sign-in is ON by default; production refuses to start without APP_SESSION_SECRET, an owner login and the Supabase settings):
-- Server sign-in with signed 12-hour session tokens (`server-auth.ts`), PIN checked ON THE SERVER with a lock after 5 wrong tries.
+- Server sign-in with signed SLIDING session tokens (`server-auth.ts`; salesman 30 days, owner 14 days, renewed through `POST /api/auth/refresh` while the app is used, hard cap `SESSION_MAX_DAYS`=180; a deactivated salesman is refused on the next refresh/request), PIN checked ON THE SERVER with a lock after 5 wrong tries.
 - Every /api route needs a valid token (health and the sign-in routes stay public). `API_AUTH_REQUIRED=false` exists for a developer machine only and is refused in production.
 - Salesman logins follow an allow-list (bills, payments, trip returns, own records); everything else is owner-only, and reads are filtered to the salesman's own records.
 - Salesman PINs are stored as scrypt hashes with a random salt per salesman; old hashes upgrade at the next sign-in. Set a PIN again for anyone who has not signed in since.

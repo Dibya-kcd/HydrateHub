@@ -8,8 +8,12 @@
  *   ADMIN_EMAILS         comma list: only these Supabase Auth users count as admin.
  *   PIN_PEPPER           optional extra secret for PIN hashes (defaults to APP_SESSION_SECRET).
  *
- * Tokens are "<payload>.<signature>" (HMAC-SHA256), valid for 12 hours. Supabase Auth access tokens are accepted
- * as admin tokens too.
+ * Tokens are "<payload>.<signature>" (HMAC-SHA256). Sessions are SLIDING: every token is silently swapped for a
+ * fresh one (POST /api/auth/refresh) while the person keeps using the app, so nobody is signed out while active.
+ *   SESSION_TTL_DAYS         salesman token life, default 30
+ *   ADMIN_SESSION_TTL_DAYS   owner token life, default 14
+ *   SESSION_MAX_DAYS         absolute cap since the real sign-in, default 180 (0 = no cap)
+ * Supabase Auth access tokens are accepted as admin tokens too.
  *
  * Salesmen are held to an ALLOW-LIST (salesmanPolicy): anything not listed is owner-only. Reads are filtered to
  * the salesman's own records and writes are forced to carry (and never overwrite someone else's) salesmanId.
@@ -22,17 +26,65 @@ export interface AuthClaims {
   sid?: string; // salesman id
   n?: string; // display name / email
   exp: number; // ms since epoch
+  iat0?: number; // ms since epoch of the original sign-in; kept across refreshes (absolute session cap)
 }
 
-export const TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Kept for callers that want a single default. Real lifetimes come from sessionTtlMs(). */
+export const TOKEN_TTL_MS = 30 * DAY_MS;
+
+function envDays(v: string | undefined, fallback: number): number {
+  if (v === undefined || String(v).trim() === "") return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/** How long a freshly issued token lives for this role. */
+export function sessionTtlMs(role: "admin" | "salesman", env: Record<string, string | undefined> = process.env): number {
+  const days =
+    role === "admin" ? envDays(env.ADMIN_SESSION_TTL_DAYS, 14) : envDays(env.SESSION_TTL_DAYS, 30);
+  return Math.max(1, days) * DAY_MS;
+}
+
+/** Longest a session may be kept alive by refreshing, counted from the original sign-in (0 = no cap). */
+export function sessionMaxMs(env: Record<string, string | undefined> = process.env): number {
+  return envDays(env.SESSION_MAX_DAYS, 180) * DAY_MS;
+}
+
+/** Time after which a client should quietly swap its token for a fresh one (half of the token's life). */
+export function refreshAtFor(issuedAt: number, expiresAt: number): number {
+  return issuedAt + Math.floor((expiresAt - issuedAt) / 2);
+}
+
+/**
+ * Re-issues a token for the same person, with a new expiry, as long as the original sign-in is inside the
+ * absolute cap. Returns null when the cap is reached (the person must sign in again).
+ */
+export function renewClaims(
+  claims: AuthClaims,
+  secret: string,
+  env: Record<string, string | undefined> = process.env,
+  now = Date.now(),
+): { token: string; expiresAt: number; refreshAt: number } | null {
+  const started = claims.iat0 && claims.iat0 > 0 ? claims.iat0 : now;
+  const cap = sessionMaxMs(env);
+  if (cap > 0 && now - started > cap) return null;
+  let expiresAt = now + sessionTtlMs(claims.r, env);
+  if (cap > 0) expiresAt = Math.min(expiresAt, started + cap);
+  const { exp: _exp, ...rest } = claims;
+  // exp is passed explicitly so the absolute cap is honoured.
+  const token = signToken({ ...rest, iat0: started, exp: expiresAt }, secret, undefined, now);
+  return { token, expiresAt, refreshAt: refreshAtFor(now, expiresAt) };
+}
 const b64u = (v: Buffer | string) => Buffer.from(v).toString("base64url");
 
 export function signToken(
   claims: Omit<AuthClaims, "exp"> & { exp?: number },
   secret: string,
-  ttlMs = TOKEN_TTL_MS,
+  ttlMs?: number,
   now = Date.now(),
 ): string {
+  if (ttlMs === undefined) ttlMs = sessionTtlMs(claims.r);
   const payload = b64u(JSON.stringify({ ...claims, exp: claims.exp ?? now + ttlMs }));
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
   return `${payload}.${sig}`;
@@ -150,6 +202,7 @@ export function isPublicApiPath(path: string): boolean {
     path === "/api/auth/status" ||
     path === "/api/auth/admin-login" ||
     path === "/api/auth/salesman-login" ||
+    path === "/api/auth/refresh" || // verifies its own bearer token
     path === "/api/admin/reload-disk"
   );
 }

@@ -3,14 +3,16 @@ import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import {
   FailureLimiter,
-  TOKEN_TTL_MS,
   authConfig,
   filterSalesmanResponse,
   hashPinSecure,
   isPublicApiPath,
   normalizeApiPath,
   ownedBy,
+  refreshAtFor,
+  renewClaims,
   safeEqual,
+  sessionTtlMs,
   salesmanPolicy,
   sanitizeSalesmanWrite,
   signToken,
@@ -561,15 +563,67 @@ export function createSecurityAndAuthSetup(deps?: {
           .json({ success: false, error: "Invalid administrator password." });
       }
       loginLimiter.reset(key);
+      const issuedAt = Date.now();
+      const expiresAt = issuedAt + sessionTtlMs("admin");
       const token = signToken(
-        { r: "admin", n: rawPhone ? `Administrator (${rawPhone})` : "Administrator" },
+        {
+          r: "admin",
+          n: rawPhone ? `Administrator (${rawPhone})` : "Administrator",
+          iat0: issuedAt,
+          exp: expiresAt,
+        },
         authCfg.secret,
       );
       return res.json({
         success: true,
         token,
-        expiresAt: Date.now() + TOKEN_TTL_MS,
+        expiresAt,
+        refreshAt: refreshAtFor(issuedAt, expiresAt),
       });
+    });
+
+    // Sliding session: swap a still-valid own token for a fresh one so an active person is never signed out.
+    // A deactivated salesman is refused here (30 s cache), which is how an owner revokes a lost phone.
+    app.post("/api/auth/refresh", async (req, res) => {
+      if (!authCfg.secret) {
+        return res
+          .status(501)
+          .json({ success: false, error: "Server sign-in is not configured." });
+      }
+      const m = /^Bearer\s+(.+)$/i.exec(String(req.headers?.authorization || ""));
+      const claims = m ? verifyToken(m[1].trim(), authCfg.secret) : null;
+      if (!claims) {
+        return res
+          .status(401)
+          .json({ success: false, error: "Session expired. Please sign in again.", code: "AUTH_REQUIRED" });
+      }
+      try {
+        if (claims.r === "salesman" && !(await salesmanStillActive(String(claims.sid || "")))) {
+          return res.status(401).json({
+            success: false,
+            error: "This salesman account is no longer active.",
+            code: "AUTH_REQUIRED",
+          });
+        }
+        const renewed = renewClaims(claims, authCfg.secret);
+        if (!renewed) {
+          return res.status(401).json({
+            success: false,
+            error: "Session reached its maximum age. Please sign in again.",
+            code: "SESSION_MAX_AGE",
+          });
+        }
+        return res.json({
+          success: true,
+          token: renewed.token,
+          expiresAt: renewed.expiresAt,
+          refreshAt: renewed.refreshAt,
+        });
+      } catch (err: any) {
+        return res
+          .status(500)
+          .json({ success: false, error: err?.message || "Refresh failed." });
+      }
     });
 
     app.post("/api/auth/salesman-login", async (req, res) => {
@@ -640,14 +694,23 @@ export function createSecurityAndAuthSetup(deps?: {
         keys.forEach((k) => loginLimiter.reset(k));
         if (check.needsUpgrade) void upgradePinHash(target, pin);
         activeCache.delete(String(target.id));
+        const issuedAt = Date.now();
+        const expiresAt = issuedAt + sessionTtlMs("salesman");
         const token = signToken(
-          { r: "salesman", sid: String(target.id), n: target.name || "" },
+          {
+            r: "salesman",
+            sid: String(target.id),
+            n: target.name || "",
+            iat0: issuedAt,
+            exp: expiresAt,
+          },
           authCfg.secret,
         );
         return res.json({
           success: true,
           token,
-          expiresAt: Date.now() + TOKEN_TTL_MS,
+          expiresAt,
+          refreshAt: refreshAtFor(issuedAt, expiresAt),
           salesman: formatSalesmanResponse(target), // never carries the PIN hash
         });
       } catch (err: any) {

@@ -1,3 +1,10 @@
+## Stay signed in: sliding sessions, no idle logout in installed apps
+
+Signed-in people were being logged out by a fixed 12-hour token (no refresh) and, in installed apps, by a 30-minute idle timer that also counted time spent in the background.
+- Tokens now slide: `POST /api/auth/refresh` swaps a valid token for a fresh one once it is half-way through its life. The app does this silently on use and when it returns to the foreground. Offline or server-asleep keeps the current token.
+- Defaults: salesman 30 days, owner 14 days, absolute cap 180 days since the real sign-in (`SESSION_TTL_DAYS`, `ADMIN_SESSION_TTL_DAYS`, `SESSION_MAX_DAYS`). A deactivated salesman is refused on refresh and on the next request.
+- Idle logout is off for installed apps (home-screen PWA, Capacitor). Browser tabs keep 30 minutes. `VITE_IDLE_LOGOUT_MINUTES` still overrides both.
+
 ## Close Trip shortages, damaged + missing, count confirmation, Edit load godowns
 
 See SHORTAGE_AND_EDIT_LOAD_CHANGES.md. Sold-but-not-billed and Other shortages now come out of book stock; Short loaded does not.
