@@ -298,9 +298,10 @@ if (typeof window !== "undefined") {
   window.addEventListener("online", () => {
     void flushPendingWrites();
   });
-  setInterval(() => {
+  const outboxRetryTimer = setInterval(() => {
     if (pendingWrites.size > 0) void flushPendingWrites();
   }, 30000);
+  (outboxRetryTimer as any)?.unref?.();
 }
 
 const STATIC_API_COLLECTIONS: Record<string, string> = {

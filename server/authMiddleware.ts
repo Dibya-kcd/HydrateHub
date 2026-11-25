@@ -23,6 +23,7 @@ import {
   IS_TEST_RUN,
   getCollectionData,
   isSupabaseAvailable,
+  isSupabaseConfigured,
   setCollectionData,
   supabase,
   withSupabaseTimeout,
@@ -48,7 +49,10 @@ export function formatSalesmanStored(s: any, hash: string) {
   return { ...formatSalesmanResponse(s), pinHash: hash, pin_hash: hash };
 }
 
-export function createSecurityAndAuthSetup() {
+export function createSecurityAndAuthSetup(deps?: {
+  isSupabaseAvailable?: () => boolean;
+}) {
+  const checkSupabaseAuthConfigured = deps?.isSupabaseAvailable || isSupabaseConfigured;
   const authCfg = authConfig();
   if (!authCfg.required && !IS_TEST_RUN) {
     console.warn(
@@ -83,6 +87,14 @@ export function createSecurityAndAuthSetup() {
   const clientIp = (req: any) =>
     String(req.ip || req.socket?.remoteAddress || "unknown");
 
+  const isDefinitiveAuthError = (err: any): boolean => {
+    if (!err) return false;
+    const status = Number(err?.status || err?.statusCode || 0);
+    if (status === 401 || status === 403) return true;
+    const msg = String(err?.message || err?.code || "");
+    return /invalid|expired|malformed|bad_jwt|session_not_found|user not found|sub claim/i.test(msg);
+  };
+
   const resolveAuth = async (req: any) => {
     const m = /^Bearer\s+(.+)$/i.exec(
       String(req.headers?.authorization || ""),
@@ -100,21 +112,42 @@ export function createSecurityAndAuthSetup() {
         ? { r: "admin" as const, n: cached.email, exp: cached.until }
         : null;
     }
-    if (!isSupabaseAvailable()) return null;
+    if (!checkSupabaseAuthConfigured()) return null;
+    let timer: NodeJS.Timeout | null = null;
     try {
-      const { data, error } = await supabase.auth.getUser(tok);
-      const email = String(data?.user?.email || "").toLowerCase();
-      const ok =
-        !error &&
-        !!data?.user &&
-        (authCfg.adminEmails.length === 0 ||
-          authCfg.adminEmails.includes(email));
-      supabaseTokenCache.set(tok, { ok, email, until: Date.now() + 60_000 });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Supabase auth timeout")), 4000);
+      });
+      const res: any = await Promise.race([
+        supabase.auth.getUser(tok),
+        timeoutPromise,
+      ]);
+      const data = res?.data;
+      const error = res?.error;
+      if (error && !isDefinitiveAuthError(error)) {
+        // Transient Supabase auth / network / timeout error: do NOT negative-cache 401 for 60s.
+        return null;
+      }
+      const email = String(data?.user?.email || "").trim().toLowerCase();
+      const phone10 = String(data?.user?.phone || "").replace(/\D/g, "").slice(-10);
+      const hasAllowList =
+        authCfg.adminEmails.length > 0 || authCfg.adminPhones.length > 0;
+      const allowedIdentity =
+        !hasAllowList ||
+        (email !== "" && authCfg.adminEmails.includes(email)) ||
+        (phone10.length === 10 && authCfg.adminPhones.includes(phone10));
+      const ok = !error && !!data?.user && allowedIdentity;
+      const display = email || phone10 || "Administrator";
+      const ttl = ok ? 60_000 : 15_000;
+      supabaseTokenCache.set(tok, { ok, email: display, until: Date.now() + ttl });
       return ok
-        ? { r: "admin" as const, n: email, exp: Date.now() + 60_000 }
+        ? { r: "admin" as const, n: display, exp: Date.now() + ttl }
         : null;
     } catch {
+      // Timeout or network exception: do not cache failure
       return null;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 
@@ -123,9 +156,9 @@ export function createSecurityAndAuthSetup() {
     const hit = activeCache.get(sid);
     if (hit && hit.until > Date.now()) return hit.ok;
     let ok = true;
+    let dbAnswered = false;
+    let row: any = null;
     try {
-      let row: any = null;
-      let dbAnswered = false;
       if (isSupabaseAvailable()) {
         const r: any = await withSupabaseTimeout(
           supabase.from("salesmen").select("id,active").eq("id", sid).maybeSingle(),
@@ -140,14 +173,18 @@ export function createSecurityAndAuthSetup() {
         const col = await getCollectionData("salesmen");
         if (Array.isArray(col)) {
           row = col.find((x: any) => String(x?.id) === sid) || null;
-          if (!row && (dbAnswered || col.length > 0)) ok = false;
+          if (!row && dbAnswered) ok = false;
+        } else if (dbAnswered) {
+          ok = false;
         }
       }
       if (row && row.active === false) ok = false;
     } catch {
       /* cannot tell: keep the session */
     }
-    activeCache.set(sid, { ok, until: Date.now() + 30_000 });
+    if (dbAnswered || row !== null) {
+      activeCache.set(sid, { ok, until: Date.now() + 30_000 });
+    }
     return ok;
   };
 

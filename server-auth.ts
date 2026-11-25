@@ -98,6 +98,17 @@ export function authConfig(env: Record<string, string | undefined> = process.env
   const secret = (env.APP_SESSION_SECRET || "").trim() || (isProd ? "" : "mrwater-distribution-ledger-session-secret-key-32chars");
   const adminPassword = env.ADMIN_PASSWORD || env.VITE_LOCAL_ADMIN_PASSWORD || (isProd ? "" : "admin1234");
   const required = flag ? !OFF_WORDS.has(flag) : isProd;
+  const adminPhones = Array.from(
+    new Set(
+      [env.ADMIN_PHONES, env.ADMIN_PHONE]
+        .filter(Boolean)
+        .join(",")
+        .split(",")
+        .map((p) => String(p || "").replace(/\D/g, ""))
+        .filter((d) => d.length >= 10)
+        .map((d) => d.slice(-10)),
+    ),
+  );
   return {
     secret,
     required,
@@ -107,6 +118,7 @@ export function authConfig(env: Record<string, string | undefined> = process.env
       .split(",")
       .map((e) => e.trim().toLowerCase())
       .filter(Boolean),
+    adminPhones,
     pinPepper: (env.PIN_PEPPER || "").trim() || secret,
     salesmanDirectory: (env.SALESMAN_CUSTOMER_DIRECTORY || "").trim().toLowerCase() === "true",
   };
@@ -119,8 +131,8 @@ export function startupProblems(env: Record<string, string | undefined> = proces
   const problems: string[] = [];
   if (!cfg.required) problems.push("API_AUTH_REQUIRED is turned off. Server sign-in cannot be disabled in production.");
   if (cfg.secret.length < 32) problems.push("APP_SESSION_SECRET must be set to 32+ random characters (e.g. `openssl rand -hex 32`).");
-  if (!cfg.adminPassword && cfg.adminEmails.length === 0) {
-    problems.push("Set ADMIN_PASSWORD (or ADMIN_EMAILS) so the owner can sign in.");
+  if (!cfg.adminPassword && cfg.adminEmails.length === 0 && cfg.adminPhones.length === 0) {
+    problems.push("Set ADMIN_PASSWORD (or ADMIN_EMAILS / ADMIN_PHONE) so the owner can sign in.");
   }
   const url = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || "").trim();
   const rawCandidateKeys = [env.SUPABASE_SERVICE_ROLE_KEY, env.VITE_SUPABASE_ANON_KEY, env.SUPABASE_ANON_KEY];

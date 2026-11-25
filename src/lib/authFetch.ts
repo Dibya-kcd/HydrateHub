@@ -41,15 +41,87 @@ export function hasApiAuthSession(): boolean {
   return Boolean(readApiSession()?.token);
 }
 
+let refreshInFlight: Promise<string | null> | null = null;
+let lastExpiredDispatchAt = 0;
+
+function dispatchAuthExpiredOnce() {
+  if (typeof window === "undefined") return;
+  const now = Date.now();
+  if (now - lastExpiredDispatchAt < 1500) return;
+  lastExpiredDispatchAt = now;
+  window.dispatchEvent(new Event("mrwater:auth-expired"));
+}
+
 async function currentToken(): Promise<string | null> {
   const own = readApiSession();
   if (own) return own.token;
   if (isServerProxyMode()) return null;
   try {
-    const { data } = (await getSupabaseClient()?.auth.getSession()) || { data: null };
-    return data?.session?.access_token || null;
+    const client = getSupabaseClient();
+    if (!client) return null;
+    const { data } = (await client.auth.getSession()) || { data: null };
+    const session = data?.session;
+    if (!session) return null;
+    const expMs = typeof session.expires_at === "number" ? session.expires_at * 1000 : 0;
+    // Proactively refresh Supabase JWT when expired or within 60 seconds of expiry
+    // (Android WebView backgrounding throttles Supabase's autoRefreshToken timer).
+    if (expMs > 0 && expMs - Date.now() < 60_000 && !refreshInFlight) {
+      refreshInFlight = (async () => {
+        try {
+          const refreshed = await client.auth.refreshSession();
+          return refreshed?.data?.session?.access_token || session.access_token || null;
+        } catch {
+          return session.access_token || null;
+        } finally {
+          refreshInFlight = null;
+        }
+      })();
+      return await refreshInFlight;
+    }
+    return session.access_token || null;
   } catch {
     return null;
+  }
+}
+
+async function recoverFreshToken(failedToken: string | null): Promise<string | null> {
+  const own = readApiSession();
+  if (own?.token && own.token !== failedToken) return own.token;
+  if (own?.token && own.token === failedToken) return null;
+  if (isServerProxyMode()) return null;
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const client = getSupabaseClient();
+        if (!client) return null;
+        const { data, error } = await client.auth.refreshSession();
+        const refreshed = !error ? data?.session?.access_token || null : null;
+        if (refreshed && refreshed !== failedToken) return refreshed;
+        const { data: sessData } = (await client.auth.getSession()) || { data: null };
+        const fallback = sessData?.session?.access_token || null;
+        return fallback && fallback !== failedToken ? fallback : null;
+      } catch {
+        return null;
+      } finally {
+        refreshInFlight = null;
+      }
+    })();
+  }
+  return refreshInFlight;
+}
+
+export async function refreshSupabaseSessionIfNeeded(): Promise<void> {
+  if (readApiSession() || isServerProxyMode()) return;
+  try {
+    const client = getSupabaseClient();
+    if (!client) return;
+    const { data } = (await client.auth.getSession()) || { data: null };
+    const expSec = data?.session?.expires_at;
+    if (data?.session && typeof expSec === "number" && expSec * 1000 - Date.now() < 5 * 60_000) {
+      await recoverFreshToken(null);
+    }
+  } catch {
+    /* ignore */
   }
 }
 
@@ -103,7 +175,9 @@ export function installAuthFetch() {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         if (!isOwnApiCall(url)) return original(input, init);
         const path = new URL(url, window.location.origin).pathname;
-        const token = NO_TOKEN_NEEDED.some((p) => path.startsWith(p)) ? null : await currentToken();
+        const skipAuth = NO_TOKEN_NEEDED.some((p) => path.startsWith(p));
+        const token = skipAuth ? null : await currentToken();
+        const retryBase = input instanceof Request && token ? input.clone() : input;
         let nextInit = init;
         if (token) {
           const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
@@ -111,10 +185,26 @@ export function installAuthFetch() {
           nextInit = { ...init, headers };
         }
         const res = await original(input, nextInit);
-        if (res.status === 401 && !NO_TOKEN_NEEDED.some((p) => path.startsWith(p))) {
-          if (token) {
+        if (res.status === 401 && !skipAuth && token) {
+          const refreshed = await recoverFreshToken(token);
+          if (refreshed) {
+            const retryHeaders = new Headers(init?.headers || (retryBase instanceof Request ? retryBase.headers : undefined));
+            retryHeaders.set("Authorization", `Bearer ${refreshed}`);
+            const retryRes = await original(retryBase, { ...init, headers: retryHeaders });
+            if (retryRes.status !== 401) {
+              return retryRes;
+            }
+            const activeOwn = readApiSession()?.token;
+            if (!activeOwn || activeOwn === refreshed) {
+              setApiSession(null);
+              dispatchAuthExpiredOnce();
+            }
+            return retryRes;
+          }
+          const activeOwn = readApiSession()?.token;
+          if (!activeOwn || activeOwn === token) {
             setApiSession(null);
-            window.dispatchEvent(new Event("mrwater:auth-expired"));
+            dispatchAuthExpiredOnce();
           }
         }
         return res;
@@ -201,7 +291,7 @@ export function openSyncEventStream(
 
   const connect = async () => {
     if (stopped) return;
-    const token = readApiSession()?.token;
+    const token = await currentToken();
     if (!token) return;
 
     controller = typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -221,8 +311,19 @@ export function openSyncEventStream(
 
       if (res.status === 401 || res.status === 403 || !res.ok || !res.body) {
         if (res.status === 401) {
-          setApiSession(null);
-          window.dispatchEvent(new Event("mrwater:auth-expired"));
+          const refreshed = await recoverFreshToken(token);
+          if (refreshed && !stopped) {
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              void connect();
+            }, 250);
+            return;
+          }
+          const activeOwn = readApiSession()?.token;
+          if (!activeOwn || activeOwn === token) {
+            setApiSession(null);
+            dispatchAuthExpiredOnce();
+          }
           return;
         }
         throw new Error(`SSE status ${res.status}`);

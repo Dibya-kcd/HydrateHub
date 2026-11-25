@@ -262,7 +262,7 @@ export function useCustomerAndPaymentActions({
             });
             const reconciled = reconcilePaymentsFromBills(
               Array.from(map.values()),
-              allBills,
+              allBillsRef.current,
             );
             if (reconciled.length === prev.length) {
               const prevById = new Map(prev.map((p) => [p.id, p]));
@@ -286,7 +286,7 @@ export function useCustomerAndPaymentActions({
         }
       })
       .catch(() => {});
-  }, [allBills, reconcilePaymentsFromBills, currentUser?.id]);
+  }, [reconcilePaymentsFromBills, currentUser?.id]);
 
   const customersHydratedRef = useRef(false);
   const customersFromSyntheticInitRef = useRef(false);

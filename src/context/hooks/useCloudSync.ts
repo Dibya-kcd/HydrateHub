@@ -1342,7 +1342,7 @@ export function useCloudSync({
     };
   }, [currentUser?.id, currentRole]);
 
-  // Auto-persist all bills & backup copies
+  // Auto-persist all bills & trim legacy duplicate backup copy inside STORAGE_KEY
   const isBillsMountedRef = useRef(false);
   useEffect(() => {
     if (!isBillsMountedRef.current) {
@@ -1353,17 +1353,13 @@ export function useCloudSync({
     scheduleBackupCopy("bills", () => {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) : {};
-        parsed.bills = allBills;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
-      } catch {
-        try {
-          const raw = localStorage.getItem(STORAGE_KEY);
-          const parsed = raw ? JSON.parse(raw) : {};
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && "bills" in parsed) {
           delete parsed.bills;
           localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
-        } catch {}
-      }
+        }
+      } catch {}
     });
   }, [allBills]);
 
@@ -1551,11 +1547,7 @@ export function useCloudSync({
       .catch(() => {});
   }, [currentUser?.id, currentRole]);
 
-  // Sync state mutations to storage & Supabase backend
-  useEffect(() => {
-    if (isInitialMountRef.current) return;
-    saveOrders(allBills);
-  }, [allBills]);
+  // Sync state mutations to storage & Supabase backend (bills handled by single effect above)
 
   useEffect(() => {
     if (isInitialMountRef.current) return;

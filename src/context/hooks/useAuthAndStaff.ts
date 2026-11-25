@@ -1,5 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { serverSignIn, setApiSession } from "../../lib/authFetch";
+import {
+  refreshSupabaseSessionIfNeeded,
+  serverSignIn,
+  setApiSession,
+} from "../../lib/authFetch";
 import {
   deleteSalesmanFromSupabase,
   isServerProxyMode,
@@ -352,14 +356,26 @@ export function useAuthAndStaff({
     if (!currentUser || typeof window === "undefined") return;
     const loginTime = Date.now();
     const onExpired = () => {
+      if (!currentUserRef.current) return;
       // Grace period: ignore auth-expired in the first 3 seconds after signing in
       // to allow background initial fetches to settle cleanly
       if (Date.now() - loginTime < 3000) return;
       notify("Your session has ended. Please sign in again.");
       logout();
     };
+    const onForeground = () => {
+      if (document.visibilityState === "hidden") return;
+      void refreshSupabaseSessionIfNeeded();
+    };
+    void refreshSupabaseSessionIfNeeded();
     window.addEventListener("mrwater:auth-expired", onExpired);
-    return () => window.removeEventListener("mrwater:auth-expired", onExpired);
+    window.addEventListener("focus", onForeground);
+    document.addEventListener("visibilitychange", onForeground);
+    return () => {
+      window.removeEventListener("mrwater:auth-expired", onExpired);
+      window.removeEventListener("focus", onForeground);
+      document.removeEventListener("visibilitychange", onForeground);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.id, currentUser?.role]);
 

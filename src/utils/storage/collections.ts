@@ -84,7 +84,36 @@ export async function loadOrders(): Promise<Order[]> {
   return loadList<Order>("/api/bills", STORAGE_KEYS.orders, { seenKind: "bills" });
 }
 
+let lastOrdersDigest = "";
+let lastOrdersSavedAt = 0;
+
+function ordersQuickDigest(orders: Order[]): string {
+  if (!Array.isArray(orders)) return "0";
+  const n = orders.length;
+  let newestStamp = "";
+  let hash = 17;
+  for (let i = 0; i < n; i++) {
+    const b = orders[i] as any;
+    const st = String(b?.updatedAt || "");
+    if (st > newestStamp) newestStamp = st;
+    const id = Number(b?.id) || 0;
+    const tot = Math.round((Number(b?.total) || 0) * 100);
+    const paid = Math.round((Number(b?.amountPaid) || 0) * 100);
+    const histLen = Array.isArray(b?.editHistory) ? b.editHistory.length : 0;
+    const statusBit = b?.status === "cancelled" ? 1 : 0;
+    hash = (Math.imul(hash, 31) + id + tot + paid + histLen + statusBit) | 0;
+  }
+  return `${n}|${newestStamp}|${hash}`;
+}
+
 export async function saveOrders(orders: Order[]): Promise<void> {
+  const digest = ordersQuickDigest(orders);
+  const now = Date.now();
+  if (digest === lastOrdersDigest && now - lastOrdersSavedAt < 2500) {
+    return;
+  }
+  lastOrdersDigest = digest;
+  lastOrdersSavedAt = now;
   writeLocalCache(STORAGE_KEYS.orders, orders);
   // Persist to server via /api/bills which syncs to Supabase public.bills
   postOrPutServer("/api/bills", "PUT", { bills: orders });

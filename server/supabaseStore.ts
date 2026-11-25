@@ -72,9 +72,13 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 let supabaseCircuitOpenUntil = 0;
 let consecutiveSupabaseErrors = 0;
 
-export function isSupabaseAvailable(): boolean {
+export function isSupabaseConfigured(): boolean {
   if (IS_TEST_RUN) return false;
-  if (!isValidSupabaseKey(SUPABASE_KEY) || SUPABASE_URL === "http://127.0.0.1:9") {
+  return isValidSupabaseKey(SUPABASE_KEY) && SUPABASE_URL !== "http://127.0.0.1:9";
+}
+
+export function isSupabaseAvailable(): boolean {
+  if (!isSupabaseConfigured()) {
     return false;
   }
   if (Date.now() < supabaseCircuitOpenUntil) {
