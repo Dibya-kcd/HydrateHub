@@ -1,10 +1,30 @@
-name: Build Web, Android APK and iOS IPA
+name: Build Web (Pages), Android APK and iOS IPA
 
-# Builds run ONLY when started by hand: GitHub > Actions > "Build Web, Android APK and iOS IPA" > Run workflow.
-# Pushing code to main does not start a build (Render redeploys the website on its own).
-# To publish a GitHub Release, run it by hand on a v* tag.
+# When this runs:
+#   - push to main/master  -> type-check + tests + web build + deploy to GitHub Pages + Android APK
+#   - pull request         -> type-check + tests + web build only (nothing is deployed)
+#   - push of a v* tag     -> everything, including the iOS IPA, then publishes a GitHub Release
+#   - Run workflow (hand)  -> everything; tick/untick the Android and iOS boxes
+# The iOS build runs on a macOS runner (billed at 10x on private repos), so it is only for tags and manual runs.
 on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
+    inputs:
+      build_android:
+        description: 'Build the Android APK'
+        type: boolean
+        default: true
+      build_ios:
+        description: 'Build the unsigned iOS IPA'
+        type: boolean
+        default: true
 
 # Least privilege: jobs that need more ask for it themselves.
 permissions:
@@ -28,8 +48,6 @@ env:
 
 jobs:
   # ---------------------------------------------------------------- Web / PWA ----------------------------
-  # Kept as a check that the web build compiles and as a downloadable zip.
-  # The live website itself is hosted on Render, not here.
   build-web:
     name: Build Web/PWA
     runs-on: ubuntu-latest
@@ -48,8 +66,14 @@ jobs:
       - name: Type-check
         run: npm run lint
 
+      - name: Run tests
+        run: npm test
+
+      # GitHub Pages serves the site from /<repository-name>/
       - name: Build web app
         run: npm run build:web
+        env:
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
 
       - name: Upload PWA artifact
         uses: actions/upload-artifact@v4
@@ -59,9 +83,40 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+  deploy-pages:
+    name: Deploy GitHub Pages
+    # One-time setup: repository Settings > Pages > Build and deployment > Source = "GitHub Actions".
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    needs: build-web
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
   # ---------------------------------------------------------------- Android ------------------------------
   build-android:
     name: Build Android APK
+    # Pushes to main, v* tags, or a manual run with the Android box ticked. Never for pull requests.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.build_android)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -81,7 +136,7 @@ jobs:
         shell: bash
         run: |
           if [ -z "${VITE_API_BASE_URL}" ]; then
-            echo "::warning title=API_BASE_URL is not set::The APK will open, but sign-in and sync need the server. Add the repository variable API_BASE_URL (e.g. https://hydratehub.onrender.com)."
+            echo "::warning title=API_BASE_URL is not set::The APK will open, but sign-in and sync need the server. Add the repository variable API_BASE_URL (e.g. https://api.example.com)."
           fi
 
       # GitHub-hosted Ubuntu runners ship an Android SDK. Do not run android-actions/setup-android here:
@@ -115,19 +170,14 @@ jobs:
           if [ ! -d android ]; then
             npx cap add android
           fi
-          # Icon generation needs an assets/ (or resources/) folder with source icons.
-          if [ -d assets ] || [ -d resources ]; then
-            npx --yes @capacitor/assets generate --android
-          else
-            echo "No assets/ or resources/ folder found - skipping icon generation"
-          fi
+          npx --yes @capacitor/assets generate --android
           npx cap sync android
 
       - name: Harden Gradle network timeouts and memory
         shell: bash
         run: |
           set -euxo pipefail
-          # Default Gradle socket timeout is 10s - that is what produces "timeout (10000ms)" when
+          # Default Gradle socket timeout is 10s — that is what produces "timeout (10000ms)" when
           # the wrapper first downloads Gradle itself or when Maven Central is slow.
           mkdir -p android
           {
@@ -180,9 +230,12 @@ jobs:
   # ---------------------------------------------------------------- iOS ----------------------------------
   # Produces an UNSIGNED .ipa (no Apple Developer account needed). It cannot be installed on a phone until it is
   # signed (AltStore / Sideloadly / your own certificate). Signed builds for TestFlight need Apple secrets.
-  # NOTE: macOS runner minutes count about 10x against the GitHub Free monthly allowance on private repos.
   build-ios:
     name: Build iOS IPA (unsigned)
+    # Only for v* tags or a manual run with the iOS box ticked (macOS minutes are expensive).
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.build_ios)
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -207,14 +260,8 @@ jobs:
       - name: Generate iOS project (skipped if ios/ is committed)
         shell: bash
         run: |
-          set -euxo pipefail
           if [ ! -d ios ]; then npx cap add ios; fi
-          # Icon generation needs an assets/ (or resources/) folder with source icons.
-          if [ -d assets ] || [ -d resources ]; then
-            npx --yes @capacitor/assets generate --ios
-          else
-            echo "No assets/ or resources/ folder found - skipping icon generation"
-          fi
+          npx --yes @capacitor/assets generate --ios
           npx cap sync ios
 
       - name: Build app (no code signing)
